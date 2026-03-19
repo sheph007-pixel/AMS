@@ -1,0 +1,83 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "sqlite"
+}
+
+/// Canonical deduplicated client/group record.
+/// A client appears once regardless of how many annual XMLs reference them.
+model Client {
+  id        String   @id @default(cuid())
+  groupId   String   @unique /// External group identifier from XML
+  groupName String
+  sicCode   String?
+  state     String?
+  metadata  String?  /// Raw source metadata as JSON
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  snapshots ClientSnapshot[]
+}
+
+/// One row per client per year. Represents the client's state in a given annual snapshot.
+model ClientSnapshot {
+  id       String @id @default(cuid())
+  clientId String
+  year     Int
+
+  groupName       String
+  totalEmployees  Int?
+  totalMembers    Int?
+  effectiveDate   String?
+  renewalDate     String?
+  sicCode         String?
+  state           String?
+  metadata        String? /// Additional raw fields as JSON
+
+  importedAt DateTime @default(now())
+
+  client        Client             @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  benefitPlans  BenefitPlan[]
+  employees     EmployeeSnapshot[]
+
+  @@unique([clientId, year])
+}
+
+/// A benefit plan attached to a client snapshot (year-specific).
+model BenefitPlan {
+  id               String @id @default(cuid())
+  clientSnapshotId String
+
+  planType    String  /// e.g. Medical, Dental, Vision, Life
+  carrier     String?
+  planName    String?
+  enrollees   Int?
+  premium     Float?
+  metadata    String? /// Raw plan data as JSON
+
+  clientSnapshot ClientSnapshot @relation(fields: [clientSnapshotId], references: [id], onDelete: Cascade)
+}
+
+/// One row per employee per client per year.
+model EmployeeSnapshot {
+  id               String @id @default(cuid())
+  clientSnapshotId String
+
+  employeeId  String  /// External employee identifier
+  firstName   String
+  lastName    String
+  dateOfBirth String?
+  hireDate    String?
+  termDate    String?
+  status      String? /// Active, Terminated, etc.
+  coverageTier String? /// EE, EE+SP, EE+CH, FAM
+  metadata    String? /// Raw employee data as JSON
+
+  clientSnapshot ClientSnapshot @relation(fields: [clientSnapshotId], references: [id], onDelete: Cascade)
+
+  @@unique([clientSnapshotId, employeeId])
+}
