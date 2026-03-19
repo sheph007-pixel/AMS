@@ -5,8 +5,8 @@
   "main": "index.js",
   "scripts": {
     "dev": "next dev",
-    "build": "next build",
-    "start": "next start",
+    "build": "npx prisma generate && npx prisma db push && next build",
+    "start": "next start -p ${PORT:-3000}",
     "db:migrate": "npx prisma migrate dev",
     "db:push": "npx prisma db push",
     "db:studio": "npx prisma studio",
@@ -20,8 +20,7 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "@libsql/client": "^0.17.1",
-    "@prisma/adapter-libsql": "^7.5.0",
+    "@prisma/adapter-pg": "^7.5.0",
     "@prisma/client": "^7.5.0",
     "@tailwindcss/postcss": "^4.2.2",
     "@types/node": "^25.5.0",
@@ -29,11 +28,15 @@
     "fast-xml-parser": "^5.5.7",
     "lucide-react": "^0.577.0",
     "next": "^16.2.0",
+    "pg": "^8.20.0",
     "postcss": "^8.5.8",
     "prisma": "^7.5.0",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
     "tailwindcss": "^4.2.2",
     "typescript": "^5.9.3"
+  },
+  "devDependencies": {
+    "@types/pg": "^8.18.0"
   }
 }
