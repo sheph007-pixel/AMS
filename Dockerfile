@@ -14,4 +14,4 @@ EXPOSE 3000
 ENV PORT=3000
 ENV HOSTNAME="0.0.0.0"
 
-CMD ["sh", "-c", "npx prisma db push --skip-generate || echo 'prisma db push failed, continuing...'; exec npx next start -H 0.0.0.0 -p ${PORT:-3000}"]
+CMD ["npx", "next", "start", "-H", "0.0.0.0", "-p", "3000"]
