@@ -9,8 +9,7 @@
     "start": "next start -p ${PORT:-3000}",
     "db:migrate": "npx prisma migrate dev",
     "db:push": "npx prisma db push",
-    "db:studio": "npx prisma studio",
-    "postinstall": "npx prisma generate"
+    "db:studio": "npx prisma studio"
   },
   "repository": {
     "type": "git",
