@@ -5,8 +5,8 @@
   "main": "index.js",
   "scripts": {
     "dev": "next dev",
-    "build": "npx prisma generate && next build",
-    "start": "next start -H 0.0.0.0 -p ${PORT:-3000}",
+    "build": "npx prisma generate && next build && cp -r .next/static .next/standalone/.next/static && cp -r public .next/standalone/public 2>/dev/null || true",
+    "start": "node .next/standalone/server.js",
     "db:migrate": "npx prisma migrate dev",
     "db:push": "npx prisma db push",
     "db:studio": "npx prisma studio"
@@ -27,6 +27,7 @@
     "@tailwindcss/postcss": "^4.2.2",
     "@types/node": "^25.5.0",
     "@types/react": "^19.2.14",
+    "dotenv": "^17.3.1",
     "fast-xml-parser": "^5.5.7",
     "lucide-react": "^0.577.0",
     "next": "^16.2.0",
