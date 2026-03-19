@@ -16,7 +16,7 @@
     "url": "https://github.com/sheph007-pixel/AMS.git"
   },
   "engines": {
-    "node": ">=20.19.0"
+    "node": "22.x"
   },
   "keywords": [],
   "author": "",
