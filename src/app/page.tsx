@@ -153,6 +153,14 @@ export default function GroupsPage() {
     downloadFile(toCSV(sorted), "groups.csv", "text/csv");
   }
 
+  // Derive Active Groups and # Enrolled directly from the displayed list
+  // so the cards always match the table exactly
+  const activeGroupCount = activeClients.length;
+  const enrolledTotal = activeClients.reduce(
+    (sum, c) => sum + (c.activeEmployees ?? 0),
+    0
+  );
+
   // Summary card data
   const cards = summary
     ? [
@@ -160,19 +168,19 @@ export default function GroupsPage() {
           label: "Active Groups",
           icon: <Building2 className="w-5 h-5 text-bob-purple" />,
           iconBg: "bg-bob-purple-light",
-          current: summary.activeGroups.current,
+          current: activeGroupCount,
           previous: summary.activeGroups.previous,
           format: (v: number) => v.toLocaleString(),
-          pct: pctChange(summary.activeGroups.current, summary.activeGroups.previous),
+          pct: pctChange(activeGroupCount, summary.activeGroups.previous),
         },
         {
           label: "# Enrolled",
           icon: <Users className="w-5 h-5 text-bob-green" />,
           iconBg: "bg-bob-green-light",
-          current: summary.enrolled.current,
+          current: enrolledTotal,
           previous: summary.enrolled.previous,
           format: (v: number) => v.toLocaleString(),
-          pct: pctChange(summary.enrolled.current, summary.enrolled.previous),
+          pct: pctChange(enrolledTotal, summary.enrolled.previous),
         },
         {
           label: "Premium",
