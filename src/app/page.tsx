@@ -56,6 +56,40 @@ function formatCurrency(value: number): string {
   return `$${value.toLocaleString()}`;
 }
 
+/**
+ * Convert a string to Title Case, preserving common abbreviations and suffixes.
+ */
+function toTitleCase(str: string): string {
+  // Words that should stay uppercase
+  const uppercaseWords = new Set(["LLC", "INC", "CO", "LP", "LLP", "PC", "PA", "DBA", "USA", "US"]);
+  // Words that should stay lowercase (unless first word)
+  const lowercaseWords = new Set(["of", "the", "and", "in", "for", "on", "at", "to", "a", "an"]);
+
+  return str
+    .split(/\s+/)
+    .map((word, index) => {
+      // Check if the word (without trailing punctuation) is an uppercase abbreviation
+      const clean = word.replace(/[.,]+$/, "");
+      const punctuation = word.slice(clean.length);
+
+      if (uppercaseWords.has(clean.toUpperCase())) {
+        return clean.toUpperCase() + punctuation;
+      }
+      if (index > 0 && lowercaseWords.has(clean.toLowerCase())) {
+        return clean.toLowerCase() + punctuation;
+      }
+      // Title-case: uppercase first letter, lowercase rest
+      // But preserve internal capitals for names like "McDonald's"
+      if (clean === clean.toUpperCase() && clean.length > 1) {
+        // ALL CAPS word → convert to Title Case
+        return clean.charAt(0).toUpperCase() + clean.slice(1).toLowerCase() + punctuation;
+      }
+      // Already mixed case — just ensure first letter is uppercase
+      return clean.charAt(0).toUpperCase() + clean.slice(1) + punctuation;
+    })
+    .join(" ");
+}
+
 function downloadFile(content: string, filename: string, mimeType: string) {
   const blob = new Blob([content], { type: mimeType });
   const url = URL.createObjectURL(blob);
@@ -70,7 +104,7 @@ function toCSV(rows: ClientRow[]): string {
   const header = "Group,State,# Employees,Medical,Dental,Vision,Supplemental (Guardian)";
   const lines = rows.map((r) =>
     [
-      `"${r.groupName}"`,
+      `"${toTitleCase(r.groupName)}"`,
       r.state || "",
       r.activeEmployees ?? "",
       r.medicalEnrolled,
@@ -316,7 +350,7 @@ export default function GroupsPage() {
                           href={`/clients/${row.id}`}
                           className="text-bob-purple hover:underline hover:text-bob-purple/80 transition-colors"
                         >
-                          {row.groupName}
+                          {toTitleCase(row.groupName)}
                         </a>
                       </td>
                       <td className="px-4 py-3 text-bob-text-soft">{row.state || "—"}</td>
