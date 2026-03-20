@@ -28,6 +28,7 @@ model ClientSnapshot {
   id       String @id @default(cuid())
   clientId String
   year     Int
+  month    Int    @default(0) /// 1-12, or 0 for unspecified
 
   groupName       String
   totalEmployees  Int?
@@ -44,7 +45,7 @@ model ClientSnapshot {
   benefitPlans  BenefitPlan[]
   employees     EmployeeSnapshot[]
 
-  @@unique([clientId, year])
+  @@unique([clientId, year, month])
 }
 
 /// A benefit plan attached to a client snapshot (year-specific).

@@ -30,6 +30,7 @@ interface Employee {
 interface Snapshot {
   id: string;
   year: number;
+  month: number;
   groupName: string;
   totalEmployees: number | null;
   totalMembers: number | null;
@@ -76,15 +77,15 @@ export default function ClientDetailPage() {
   const [client, setClient] = useState<ClientDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [tab, setTab] = useState<Tab>("overview");
-  const [selectedYear, setSelectedYear] = useState<number | null>(null);
+  const [selectedSnapshotId, setSelectedSnapshotId] = useState<string | null>(null);
 
   useEffect(() => {
     fetch(`/api/clients/${params.id}`)
       .then((res) => res.json())
       .then((data) => {
         setClient(data);
-        if (data.years?.length > 0) {
-          setSelectedYear(Math.max(...data.years));
+        if (data.snapshots?.length > 0) {
+          setSelectedSnapshotId(data.snapshots[data.snapshots.length - 1].id);
         }
       })
       .finally(() => setLoading(false));
@@ -93,7 +94,7 @@ export default function ClientDetailPage() {
   if (loading) return <div className="text-center py-12 text-gray-500">Loading...</div>;
   if (!client) return <div className="text-center py-12 text-gray-500">Client not found</div>;
 
-  const snapshot = client.snapshots.find((s) => s.year === selectedYear);
+  const snapshot = client.snapshots.find((s) => s.id === selectedSnapshotId);
   const tabs: { key: Tab; label: string; icon: React.ReactNode }[] = [
     { key: "overview", label: "Overview", icon: <Building2 className="w-4 h-4" /> },
     { key: "benefits", label: "Benefits", icon: <Shield className="w-4 h-4" /> },
@@ -118,10 +119,10 @@ export default function ClientDetailPage() {
           {client.state && <span>{client.state}</span>}
           {client.sicCode && <span>SIC: {client.sicCode}</span>}
         </div>
-        <div className="flex gap-1.5 mt-3">
-          {client.years.map((yr) => (
-            <span key={yr} className="px-2.5 py-1 text-xs font-medium bg-gray-100 text-gray-700 rounded">
-              {yr}
+        <div className="flex gap-1.5 mt-3 flex-wrap">
+          {client.snapshots.map((s) => (
+            <span key={s.id} className="px-2.5 py-1 text-xs font-medium bg-gray-100 text-gray-700 rounded">
+              {s.month > 0 ? `${s.month}/${s.year}` : s.year}
             </span>
           ))}
         </div>
@@ -146,20 +147,20 @@ export default function ClientDetailPage() {
       </div>
 
       {/* Year selector for benefits & employees */}
-      {tab !== "overview" && client.years.length > 0 && (
-        <div className="flex items-center gap-2 mb-4">
-          <span className="text-sm text-gray-500">Year:</span>
-          {client.years.map((yr) => (
+      {tab !== "overview" && client.snapshots.length > 0 && (
+        <div className="flex items-center gap-2 mb-4 flex-wrap">
+          <span className="text-sm text-gray-500">Period:</span>
+          {client.snapshots.map((s) => (
             <button
-              key={yr}
-              onClick={() => setSelectedYear(yr)}
+              key={s.id}
+              onClick={() => setSelectedSnapshotId(s.id)}
               className={`px-3 py-1 text-sm rounded-lg border transition-colors ${
-                selectedYear === yr
+                selectedSnapshotId === s.id
                   ? "bg-gray-900 text-white border-gray-900"
                   : "bg-white text-gray-700 border-gray-300 hover:bg-gray-50"
               }`}
             >
-              {yr}
+              {s.month > 0 ? `${s.month}/${s.year}` : s.year}
             </button>
           ))}
         </div>

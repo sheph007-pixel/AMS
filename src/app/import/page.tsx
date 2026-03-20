@@ -1,150 +1,292 @@
 "use client";
 
-import { useState } from "react";
-import { Upload, CheckCircle, AlertCircle } from "lucide-react";
+import { useRef, useState } from "react";
+import { Upload, CheckCircle, AlertCircle, FileText, X } from "lucide-react";
+
+const MONTH_NAMES = [
+  "", "January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December",
+];
+
+interface ImportResult {
+  year: number;
+  month: number | null;
+  detectedDate: string | null;
+  clientsProcessed: number;
+  clientsCreated: number;
+  clientsUpdated: number;
+  benefitPlansCreated: number;
+  employeesProcessed: number;
+}
+
+type ImportStatus = "idle" | "reading" | "uploading" | "processing" | "done" | "error";
+
+const STEPS = [
+  { key: "reading", label: "Reading file" },
+  { key: "uploading", label: "Uploading" },
+  { key: "processing", label: "Processing data" },
+  { key: "done", label: "Complete" },
+] as const;
 
 export default function ImportPage() {
-  const [year, setYear] = useState<string>(String(new Date().getFullYear()));
-  const [file, setFile] = useState<File | null>(null);
-  const [loading, setLoading] = useState(false);
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const [result, setResult] = useState<any>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [files, setFiles] = useState<File[]>([]);
+  const [status, setStatus] = useState<ImportStatus>("idle");
+  const [progress, setProgress] = useState(0);
+  const [result, setResult] = useState<ImportResult | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  function handleDrop(e: React.DragEvent) {
+    e.preventDefault();
+    const dropped = Array.from(e.dataTransfer.files).filter((f) =>
+      f.name.toLowerCase().endsWith(".xml")
+    );
+    if (dropped.length > 0) setFiles(dropped);
+  }
+
+  function handleFileSelect(e: React.ChangeEvent<HTMLInputElement>) {
+    const selected = Array.from(e.target.files || []);
+    if (selected.length > 0) setFiles(selected);
+  }
+
+  function removeFile(index: number) {
+    setFiles((prev) => prev.filter((_, i) => i !== index));
+  }
+
+  function formatSize(bytes: number): string {
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  }
+
   async function handleImport() {
-    if (!file || !year) return;
-    setLoading(true);
+    if (files.length === 0) return;
+    setStatus("reading");
+    setProgress(10);
     setResult(null);
     setError(null);
 
-    const formData = new FormData();
-    formData.append("file", file);
-    formData.append("year", year);
-
     try {
+      // Step 1: Read file
+      await new Promise((r) => setTimeout(r, 200));
+      setProgress(20);
+
+      // Step 2: Upload
+      setStatus("uploading");
+      setProgress(30);
+
+      const formData = new FormData();
+      formData.append("file", files[0]);
+      // Don't send year/month — let the server auto-detect from XML
+
       const res = await fetch("/api/import", { method: "POST", body: formData });
+      setProgress(60);
+
+      // Step 3: Processing
+      setStatus("processing");
+      setProgress(80);
+
       const data = await res.json();
+
       if (!res.ok) {
-        setError(data.error || "Import failed");
-      } else {
-        setResult(data);
+        throw new Error(data.error || "Import failed");
       }
-    } catch {
-      setError("Network error during import");
-    } finally {
-      setLoading(false);
+
+      setProgress(100);
+      setStatus("done");
+      setResult(data);
+    } catch (err) {
+      setStatus("error");
+      setError(err instanceof Error ? err.message : "Import failed");
     }
   }
 
+  function reset() {
+    setFiles([]);
+    setStatus("idle");
+    setProgress(0);
+    setResult(null);
+    setError(null);
+  }
+
+  const currentStepIndex = STEPS.findIndex((s) => s.key === status);
+  const isWorking = ["reading", "uploading", "processing"].includes(status);
+
   return (
-    <div className="max-w-xl mx-auto">
-      <h1 className="text-2xl font-bold mb-6">Import Annual XML</h1>
-      <p className="text-sm text-gray-500 mb-6">
-        Upload a complete annual XML snapshot. Each file represents one full year
-        of client data. Clients are automatically deduplicated across years.
+    <div className="max-w-2xl mx-auto">
+      <h1 className="text-2xl font-bold mb-1">Import XML Data</h1>
+      <p className="text-sm text-gray-500 mb-8">
+        Upload an Employee Navigator XML export. The date is automatically detected
+        from the file. Clients are deduplicated across imports.
       </p>
 
-      <div className="bg-white rounded-lg border border-gray-200 p-6 space-y-4">
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">
-            Snapshot Year
-          </label>
-          <select
-            value={year}
-            onChange={(e) => setYear(e.target.value)}
-            className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-          >
-            {Array.from({ length: 5 }, (_, i) => 2022 + i).map((y) => (
-              <option key={y} value={y}>
-                {y}
-              </option>
-            ))}
-          </select>
-        </div>
-
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">
-            XML File
-          </label>
-          <div className="border-2 border-dashed border-gray-300 rounded-lg p-6 text-center">
-            <Upload className="w-8 h-8 text-gray-400 mx-auto mb-2" />
-            <input
-              type="file"
-              accept=".xml"
-              onChange={(e) => setFile(e.target.files?.[0] || null)}
-              className="text-sm"
-            />
-          </div>
-        </div>
-
-        <button
-          onClick={handleImport}
-          disabled={!file || loading}
-          className="w-full bg-gray-900 text-white py-2 px-4 rounded-lg text-sm font-medium hover:bg-gray-800 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+      {/* File Drop Zone */}
+      {status === "idle" && (
+        <div
+          onDragOver={(e) => e.preventDefault()}
+          onDrop={handleDrop}
+          onClick={() => fileInputRef.current?.click()}
+          className="bg-white rounded-xl border-2 border-dashed border-gray-300 hover:border-gray-400 hover:bg-gray-50 transition-colors cursor-pointer p-10"
         >
-          {loading ? "Importing..." : "Import"}
-        </button>
-      </div>
-
-      {result && (
-        <div className="mt-4 bg-green-50 border border-green-200 rounded-lg p-4">
-          <div className="flex items-center gap-2 mb-2">
-            <CheckCircle className="w-5 h-5 text-green-600" />
-            <span className="font-medium text-green-800">Import successful</span>
+          <div className="text-center">
+            <div className="w-12 h-12 bg-gray-100 rounded-full flex items-center justify-center mx-auto mb-4">
+              <Upload className="w-6 h-6 text-gray-500" />
+            </div>
+            <p className="text-sm font-medium text-gray-700 mb-1">
+              Drop XML file here or click to browse
+            </p>
+            <p className="text-xs text-gray-400">
+              Supports Employee Navigator Broker Data Exchange format
+            </p>
           </div>
-          <dl className="text-sm text-green-700 space-y-1">
-            <div className="flex justify-between">
-              <dt>Year</dt>
-              <dd>{String(result.year)}</dd>
-            </div>
-            <div className="flex justify-between">
-              <dt>Clients processed</dt>
-              <dd>{String(result.clientsProcessed)}</dd>
-            </div>
-            <div className="flex justify-between">
-              <dt>New clients created</dt>
-              <dd>{String(result.clientsCreated)}</dd>
-            </div>
-            <div className="flex justify-between">
-              <dt>Existing clients updated</dt>
-              <dd>{String(result.clientsUpdated)}</dd>
-            </div>
-            <div className="flex justify-between">
-              <dt>Benefit plans imported</dt>
-              <dd>{String(result.benefitPlansCreated)}</dd>
-            </div>
-            <div className="flex justify-between">
-              <dt>Employees imported</dt>
-              <dd>{String(result.employeesProcessed)}</dd>
-            </div>
-          </dl>
-          {result.clientsProcessed === 0 && (result.debugStructure || result.rawPreview) && (
-            <div className="mt-3 pt-3 border-t border-green-200 space-y-2">
-              {result.debugStructure && (
-                <>
-                  <p className="text-xs font-medium text-green-800">Debug: Parsed XML structure</p>
-                  <pre className="text-xs text-green-700 bg-green-100 rounded p-2 overflow-auto max-h-48 whitespace-pre-wrap">
-                    {JSON.stringify(result.debugStructure, null, 2)}
-                  </pre>
-                </>
-              )}
-              {result.rawPreview && (
-                <>
-                  <p className="text-xs font-medium text-green-800">Debug: Raw XML (first 2000 chars)</p>
-                  <pre className="text-xs text-green-700 bg-green-100 rounded p-2 overflow-auto max-h-48 whitespace-pre-wrap">
-                    {String(result.rawPreview)}
-                  </pre>
-                </>
-              )}
-            </div>
-          )}
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".xml"
+            onChange={handleFileSelect}
+            className="hidden"
+          />
         </div>
       )}
 
-      {error && (
-        <div className="mt-4 bg-red-50 border border-red-200 rounded-lg p-4 flex items-center gap-2">
-          <AlertCircle className="w-5 h-5 text-red-600" />
-          <span className="text-sm text-red-800">{error}</span>
+      {/* Selected Files */}
+      {files.length > 0 && status === "idle" && (
+        <div className="mt-4 space-y-2">
+          {files.map((file, i) => (
+            <div
+              key={i}
+              className="bg-white rounded-lg border border-gray-200 px-4 py-3 flex items-center justify-between"
+            >
+              <div className="flex items-center gap-3">
+                <FileText className="w-5 h-5 text-blue-500" />
+                <div>
+                  <p className="text-sm font-medium text-gray-900">{file.name}</p>
+                  <p className="text-xs text-gray-400">{formatSize(file.size)}</p>
+                </div>
+              </div>
+              <button
+                onClick={(e) => { e.stopPropagation(); removeFile(i); }}
+                className="text-gray-400 hover:text-gray-600"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+          ))}
+
+          <button
+            onClick={handleImport}
+            className="w-full bg-gray-900 text-white py-3 px-4 rounded-lg text-sm font-medium hover:bg-gray-800 transition-colors mt-4"
+          >
+            Import File
+          </button>
+        </div>
+      )}
+
+      {/* Progress Tracker */}
+      {(isWorking || status === "done") && (
+        <div className="bg-white rounded-xl border border-gray-200 p-6 mt-4">
+          {/* File info */}
+          <div className="flex items-center gap-3 mb-6">
+            <FileText className="w-5 h-5 text-blue-500" />
+            <span className="text-sm font-medium text-gray-700">{files[0]?.name}</span>
+          </div>
+
+          {/* Progress bar */}
+          <div className="h-2 bg-gray-100 rounded-full overflow-hidden mb-6">
+            <div
+              className={`h-full rounded-full transition-all duration-500 ease-out ${
+                status === "done" ? "bg-green-500" : "bg-blue-500"
+              }`}
+              style={{ width: `${progress}%` }}
+            />
+          </div>
+
+          {/* Steps */}
+          <div className="flex justify-between">
+            {STEPS.map((step, i) => {
+              const isActive = step.key === status;
+              const isComplete = i < currentStepIndex || status === "done";
+              return (
+                <div key={step.key} className="flex items-center gap-2">
+                  <div
+                    className={`w-6 h-6 rounded-full flex items-center justify-center text-xs font-medium ${
+                      isComplete
+                        ? "bg-green-500 text-white"
+                        : isActive
+                        ? "bg-blue-500 text-white"
+                        : "bg-gray-100 text-gray-400"
+                    }`}
+                  >
+                    {isComplete ? "✓" : i + 1}
+                  </div>
+                  <span
+                    className={`text-xs ${
+                      isActive ? "text-gray-900 font-medium" : isComplete ? "text-green-700" : "text-gray-400"
+                    }`}
+                  >
+                    {step.label}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Success Result */}
+      {status === "done" && result && (
+        <div className="mt-4 bg-green-50 border border-green-200 rounded-xl p-6">
+          <div className="flex items-center gap-2 mb-4">
+            <CheckCircle className="w-5 h-5 text-green-600" />
+            <span className="font-semibold text-green-800">Import Complete</span>
+          </div>
+
+          {result.detectedDate && (
+            <p className="text-sm text-green-700 mb-4">
+              Detected date: <span className="font-medium">
+                {result.month ? `${MONTH_NAMES[result.month]} ${result.year}` : result.year}
+              </span>
+            </p>
+          )}
+
+          <div className="grid grid-cols-2 gap-3">
+            {[
+              { label: "Clients processed", value: result.clientsProcessed },
+              { label: "New clients", value: result.clientsCreated },
+              { label: "Updated clients", value: result.clientsUpdated },
+              { label: "Benefit plans", value: result.benefitPlansCreated },
+              { label: "Employees", value: result.employeesProcessed },
+            ].map((stat) => (
+              <div key={stat.label} className="bg-white rounded-lg border border-green-200 px-4 py-3">
+                <p className="text-xs text-green-600">{stat.label}</p>
+                <p className="text-lg font-bold text-green-800">{stat.value.toLocaleString()}</p>
+              </div>
+            ))}
+          </div>
+
+          <button
+            onClick={reset}
+            className="mt-4 w-full bg-white border border-gray-300 text-gray-700 py-2.5 px-4 rounded-lg text-sm font-medium hover:bg-gray-50 transition-colors"
+          >
+            Import Another File
+          </button>
+        </div>
+      )}
+
+      {/* Error */}
+      {status === "error" && (
+        <div className="mt-4 bg-red-50 border border-red-200 rounded-xl p-6">
+          <div className="flex items-center gap-2 mb-2">
+            <AlertCircle className="w-5 h-5 text-red-600" />
+            <span className="font-medium text-red-800">Import Failed</span>
+          </div>
+          <p className="text-sm text-red-700 mb-4">{error}</p>
+          <button
+            onClick={reset}
+            className="bg-white border border-gray-300 text-gray-700 py-2 px-4 rounded-lg text-sm font-medium hover:bg-gray-50 transition-colors"
+          >
+            Try Again
+          </button>
         </div>
       )}
     </div>

@@ -17,7 +17,7 @@ export async function GET(
             benefitPlans: true,
             employees: true,
           },
-          orderBy: { year: "asc" },
+          orderBy: [{ year: "asc" }, { month: "asc" }],
         },
       },
     });

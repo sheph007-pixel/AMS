@@ -6,16 +6,19 @@ export async function POST(request: NextRequest) {
     const formData = await request.formData();
     const file = formData.get("file") as File | null;
     const yearStr = formData.get("year") as string | null;
+    const monthStr = formData.get("month") as string | null;
 
-    if (!file || !yearStr) {
+    if (!file) {
       return NextResponse.json(
-        { error: "Both 'file' (XML) and 'year' are required" },
+        { error: "An XML file is required" },
         { status: 400 }
       );
     }
 
-    const year = parseInt(yearStr, 10);
-    if (isNaN(year) || year < 2000 || year > 2100) {
+    const year = yearStr ? parseInt(yearStr, 10) : undefined;
+    const month = monthStr ? parseInt(monthStr, 10) : undefined;
+
+    if (year !== undefined && (isNaN(year) || year < 2000 || year > 2100)) {
       return NextResponse.json(
         { error: "Year must be a valid number between 2000 and 2100" },
         { status: 400 }
@@ -23,7 +26,7 @@ export async function POST(request: NextRequest) {
     }
 
     const xmlContent = await file.text();
-    const result = await importAnnualXml(xmlContent, year);
+    const result = await importAnnualXml(xmlContent, year, month);
 
     return NextResponse.json({ success: true, ...result });
   } catch (error) {

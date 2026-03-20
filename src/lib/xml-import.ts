@@ -20,6 +20,8 @@ const parser = new XMLParser({
 
 interface ImportResult {
   year: number;
+  month: number | null;
+  detectedDate: string | null;
   clientsProcessed: number;
   clientsCreated: number;
   clientsUpdated: number;
@@ -47,11 +49,38 @@ interface ImportResult {
  *     </Companies>
  *   </Data>
  */
+/**
+ * Auto-detect date from XML Header (RunDate, Created, etc.)
+ */
+function detectDateFromXml(parsed: any): { year: number; month: number } | null {
+  const data = parsed.Data || parsed.data || parsed;
+  const header = data.Header || data.header;
+
+  // Try RunDate from header first
+  const dateStr =
+    (header && (header.RunDate || header.Created || header.Date)) ||
+    data.RunDate || data.Created;
+
+  if (dateStr) {
+    const d = new Date(String(dateStr));
+    if (!isNaN(d.getTime())) {
+      return { year: d.getFullYear(), month: d.getMonth() + 1 };
+    }
+  }
+  return null;
+}
+
 export async function importAnnualXml(
   xmlContent: string,
-  year: number
+  year?: number,
+  month?: number
 ): Promise<ImportResult> {
   const parsed = parser.parse(xmlContent);
+
+  // Auto-detect date from XML if not provided
+  const detected = detectDateFromXml(parsed);
+  const resolvedYear = year || detected?.year || new Date().getFullYear();
+  const resolvedMonth = month || detected?.month || null;
 
   // Load exclusion rules from the database
   const exclusionRules = await prisma.exclusionRule.findMany();
@@ -61,7 +90,9 @@ export async function importAnnualXml(
   const rawPreview = xmlContent.substring(0, 2000);
 
   const result: ImportResult = {
-    year,
+    year: resolvedYear,
+    month: resolvedMonth,
+    detectedDate: detected ? `${detected.year}-${String(detected.month).padStart(2, "0")}` : null,
     clientsProcessed: 0,
     clientsCreated: 0,
     clientsUpdated: 0,
@@ -119,17 +150,12 @@ export async function importAnnualXml(
       result.clientsUpdated++;
     }
 
-    // --- Handle snapshot (historical vs current year) ---
+    // --- Handle snapshot (delete existing for same year+month, then recreate) ---
     const existingSnapshot = await prisma.clientSnapshot.findUnique({
-      where: { clientId_year: { clientId: client.id, year } },
+      where: { clientId_year_month: { clientId: client.id, year: resolvedYear, month: resolvedMonth ?? 0 } },
     });
 
-    if (existingSnapshot && year < 2026) {
-      result.clientsProcessed++;
-      continue; // Historical snapshot already exists
-    }
-
-    if (existingSnapshot && year >= 2026) {
+    if (existingSnapshot) {
       await prisma.clientSnapshot.delete({ where: { id: existingSnapshot.id } });
     }
 
@@ -145,7 +171,8 @@ export async function importAnnualXml(
     const snapshot = await prisma.clientSnapshot.create({
       data: {
         clientId: client.id,
-        year,
+        year: resolvedYear,
+        month: resolvedMonth ?? 0,
         groupName,
         totalEmployees: totalEmployees || null,
         totalMembers: totalMembers || null,
