@@ -102,12 +102,7 @@ export async function importAnnualXml(
           groupName,
           sicCode,
           state: situsState,
-          metadata: JSON.stringify({
-            ein,
-            corporationType: extractField(company, "CorporationType"),
-            address: extractAddress(company),
-            phone: extractPhone(company),
-          }),
+          metadata: JSON.stringify(collectAllFields(company)),
         },
       });
       result.clientsCreated++;
@@ -158,13 +153,7 @@ export async function importAnnualXml(
         renewalDate,
         sicCode,
         state: situsState,
-        metadata: JSON.stringify({
-          ein,
-          address: extractAddress(company),
-          departments: extractNames(company, "Departments", "Department"),
-          divisions: extractNames(company, "Divisions", "Division"),
-          classes: extractNames(company, "Classes", "Class"),
-        }),
+        metadata: JSON.stringify(collectAllFields(company)),
       },
     });
 
@@ -202,19 +191,7 @@ export async function importAnnualXml(
           planName,
           enrollees: enrolleeCount,
           premium: monthlyCost,
-          metadata: JSON.stringify({
-            policyNumber,
-            groupNumber,
-            planIdentifier,
-            carrierPlanCode: extractField(plan, "CarrierPlanCode"),
-            carrierPlanTypeCode: extractField(plan, "CarrierPlanTypeCode"),
-            carrierBenefitCode: extractField(plan, "CarrierBenefitCode"),
-            planStarts: extractField(plan, "PlanStarts"),
-            planEnds: extractField(plan, "PlanEnds"),
-            coverageLevel: extractField(plan, "CoverageLevel"),
-            isSelfFunded: extractField(plan, "IsSelfFunded"),
-            isPostTax: extractField(plan, "IsPostTax"),
-          }),
+          metadata: JSON.stringify(collectAllFields(plan)),
         },
       });
       result.benefitPlansCreated++;
@@ -255,26 +232,7 @@ export async function importAnnualXml(
           termDate: termDate,
           status,
           coverageTier,
-          metadata: JSON.stringify({
-            middleName: extractField(person, "MiddleName"),
-            suffix: extractField(person, "Suffix"),
-            gender,
-            ssn: ssn ? `***-**-${ssn.slice(-4)}` : null, // Mask SSN
-            maritalStatus: extractField(person, "MaritalStatus"),
-            tobaccoUser: extractField(person, "TobaccoUser"),
-            employmentType: extractField(emp, "EmploymentType"),
-            weeklyHours: extractField(emp, "WeeklyHours"),
-            jobTitle: extractField(emp, "JobTitle"),
-            salary: extractField(emp, "Salary", "AnnualBenefitSalary"),
-            payFrequency: extractField(emp, "PayFrequency"),
-            department: extractField(emp, "Department"),
-            division: extractField(emp, "Division"),
-            office: extractField(emp, "Office"),
-            class: extractField(emp, "Class"),
-            email: extractField(emp, "WorkEmailAddress", "PersonalEmailAddress"),
-            dependentCount: findDependents(emp).length || 0,
-            enrollmentCount: enrollments.length,
-          }),
+          metadata: JSON.stringify(collectAllFields(emp)),
         },
       });
       result.employeesProcessed++;
@@ -511,6 +469,35 @@ function countTotalMembers(employees: any[]): number {
     total += findDependents(emp).length;
   }
   return total;
+}
+
+// ===== Full-field capture =====
+
+/** Recursively collect all fields from a parsed XML object into a flat-ish JSON structure.
+ *  Skips large nested containers (Employees, Plans, Companies) to avoid duplication.
+ *  Masks SSN values for privacy. */
+const SKIP_CONTAINERS = new Set([
+  "Companies", "companies", "Employees", "employees", "Plans", "plans",
+  "Company", "company", "Employee", "employee", "Plan", "plan",
+]);
+
+function collectAllFields(obj: any, depth = 0): any {
+  if (depth > 6 || !obj || typeof obj !== "object") return obj;
+  if (Array.isArray(obj)) {
+    return obj.map((item) => collectAllFields(item, depth + 1));
+  }
+  const result: Record<string, any> = {};
+  for (const [key, value] of Object.entries(obj)) {
+    // Skip large containers that are stored separately
+    if (depth === 0 && SKIP_CONTAINERS.has(key)) continue;
+    // Mask SSN values
+    if ((key === "SSN" || key === "ssn") && typeof value === "string" && value.length >= 4) {
+      result[key] = `***-**-${value.slice(-4)}`;
+      continue;
+    }
+    result[key] = collectAllFields(value, depth + 1);
+  }
+  return result;
 }
 
 // ===== Utility =====
