@@ -7,7 +7,8 @@ export default function ImportPage() {
   const [year, setYear] = useState<string>(String(new Date().getFullYear()));
   const [file, setFile] = useState<File | null>(null);
   const [loading, setLoading] = useState(false);
-  const [result, setResult] = useState<Record<string, unknown> | null>(null);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const [result, setResult] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
 
   async function handleImport() {
@@ -117,7 +118,7 @@ export default function ImportPage() {
               <dd>{String(result.employeesProcessed)}</dd>
             </div>
           </dl>
-          {Number(result.clientsProcessed) === 0 && (result.debugStructure || result.rawPreview) && (
+          {result.clientsProcessed === 0 && (result.debugStructure || result.rawPreview) && (
             <div className="mt-3 pt-3 border-t border-green-200 space-y-2">
               {result.debugStructure && (
                 <>
