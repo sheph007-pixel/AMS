@@ -92,14 +92,20 @@ export async function GET() {
         }
       }
 
-      // Accumulate YoY metrics
+      // Accumulate YoY metrics — only count active enrolled employees
       const currentYearSnapshots = client.snapshots.filter((s) => s.year === currentYear);
       const lastYearSnapshots = client.snapshots.filter((s) => s.year === lastYear);
 
       if (currentYearSnapshots.length > 0) {
         currentYearActiveGroups++;
         const cySnap = currentYearSnapshots[currentYearSnapshots.length - 1];
-        currentYearEnrolled += cySnap.totalEmployees ?? 0;
+        if (cySnap.employees.length > 0) {
+          currentYearEnrolled += cySnap.employees.filter(
+            (e) => !e.status || e.status.toLowerCase() === "active"
+          ).length;
+        } else {
+          currentYearEnrolled += cySnap.totalEmployees ?? 0;
+        }
         for (const plan of cySnap.benefitPlans) {
           currentYearPremium += plan.premium ?? 0;
         }
@@ -108,7 +114,13 @@ export async function GET() {
       if (lastYearSnapshots.length > 0) {
         lastYearActiveGroups++;
         const lySnap = lastYearSnapshots[lastYearSnapshots.length - 1];
-        lastYearEnrolled += lySnap.totalEmployees ?? 0;
+        if (lySnap.employees.length > 0) {
+          lastYearEnrolled += lySnap.employees.filter(
+            (e) => !e.status || e.status.toLowerCase() === "active"
+          ).length;
+        } else {
+          lastYearEnrolled += lySnap.totalEmployees ?? 0;
+        }
         for (const plan of lySnap.benefitPlans) {
           lastYearPremium += plan.premium ?? 0;
         }
