@@ -17,27 +17,55 @@ export async function GET() {
   try {
     const exclusionRules = await getExclusionRules();
 
-    // Step 1: Find the most current data period (highest year, then highest month)
-    const latestSnapshot = await prisma.clientSnapshot.findFirst({
+    // Step 1: Find the most current data period that actually has employee data.
+    // Get distinct year+month combos ordered by most recent first, then check which
+    // one has actual employees.
+    const allPeriods = await prisma.clientSnapshot.findMany({
+      select: { year: true, month: true },
+      distinct: ["year", "month"],
       orderBy: [{ year: "desc" }, { month: "desc" }],
-      select: { year: true, month: true, importedAt: true },
     });
 
-    if (!latestSnapshot) {
+    if (allPeriods.length === 0) {
       return NextResponse.json({ rows: [], totals: null, lastUpload: null });
     }
 
-    // Step 2: Get ALL snapshots from that data period (same year + month)
+    // Find the first period that has snapshots with employees
+    let chosenPeriod: { year: number; month: number } | null = null;
+    for (const period of allPeriods) {
+      const count = await prisma.employeeSnapshot.count({
+        where: {
+          clientSnapshot: { year: period.year, month: period.month },
+        },
+      });
+      if (count > 0) {
+        chosenPeriod = period;
+        break;
+      }
+    }
+
+    if (!chosenPeriod) {
+      return NextResponse.json({ rows: [], totals: null, lastUpload: null });
+    }
+
+    // Step 2: Get ALL snapshots from that data period
     const snapshots = await prisma.clientSnapshot.findMany({
       where: {
-        year: latestSnapshot.year,
-        month: latestSnapshot.month,
+        year: chosenPeriod.year,
+        month: chosenPeriod.month,
       },
       include: {
         client: { select: { id: true, groupName: true } },
         benefitPlans: true,
         employees: true,
       },
+    });
+
+    // Get the importedAt for display
+    const periodMeta = await prisma.clientSnapshot.findFirst({
+      where: { year: chosenPeriod.year, month: chosenPeriod.month },
+      orderBy: { importedAt: "desc" },
+      select: { importedAt: true },
     });
 
     const carrierMap = new Map<
@@ -175,8 +203,8 @@ export async function GET() {
     return NextResponse.json({
       rows,
       totals,
-      lastUpload: latestSnapshot.importedAt.toISOString(),
-      dataPeriod: `${latestSnapshot.year}-${String(latestSnapshot.month).padStart(2, "0")}`,
+      lastUpload: periodMeta?.importedAt.toISOString() || null,
+      dataPeriod: `${chosenPeriod.year}-${String(chosenPeriod.month).padStart(2, "0")}`,
     });
   } catch (error) {
     console.error("Benefits report error:", error);
