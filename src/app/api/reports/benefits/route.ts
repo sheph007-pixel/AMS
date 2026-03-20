@@ -5,68 +5,38 @@ import { getExclusionRules, isExcluded } from "@/lib/exclusions";
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 /**
- * Benefits Report — based on the most current data period (highest year+month).
+ * Benefits Report — latest snapshot per client.
  *
- * 1. Find the highest year+month across all snapshots → most current data period
- * 2. Pull ALL snapshots from that data period
- * 3. For each snapshot: only active employees → their active enrollments
- * 4. Aggregate by carrier: enrolled count + sum of MonthlyPlanCost
- * 5. Hide any carrier row where enrolled = 0 or premium = 0
+ * 1. For each client, take the latest snapshot (highest year+month)
+ * 2. Only active employees → their active enrollments
+ * 3. Aggregate by carrier: enrolled count + sum of MonthlyPlanCost
+ * 4. Hide any carrier row where enrolled = 0 or premium = 0
  */
 export async function GET() {
   try {
     const exclusionRules = await getExclusionRules();
 
-    // Step 1: Find the most current data period that actually has employee data.
-    // Get distinct year+month combos ordered by most recent first, then check which
-    // one has actual employees.
-    const allPeriods = await prisma.clientSnapshot.findMany({
-      select: { year: true, month: true },
-      distinct: ["year", "month"],
-      orderBy: [{ year: "desc" }, { month: "desc" }],
-    });
-
-    if (allPeriods.length === 0) {
-      return NextResponse.json({ rows: [], totals: null, lastUpload: null });
-    }
-
-    // Find the first period that has snapshots with employees
-    let chosenPeriod: { year: number; month: number } | null = null;
-    for (const period of allPeriods) {
-      const count = await prisma.employeeSnapshot.count({
-        where: {
-          clientSnapshot: { year: period.year, month: period.month },
-        },
-      });
-      if (count > 0) {
-        chosenPeriod = period;
-        break;
-      }
-    }
-
-    if (!chosenPeriod) {
-      return NextResponse.json({ rows: [], totals: null, lastUpload: null });
-    }
-
-    // Step 2: Get ALL snapshots from that data period
-    const snapshots = await prisma.clientSnapshot.findMany({
-      where: {
-        year: chosenPeriod.year,
-        month: chosenPeriod.month,
-      },
+    // Get latest snapshot per client
+    const clients = await prisma.client.findMany({
       include: {
-        client: { select: { id: true, groupName: true } },
-        benefitPlans: true,
-        employees: true,
+        snapshots: {
+          include: {
+            benefitPlans: true,
+            employees: true,
+          },
+          orderBy: [{ year: "desc" }, { month: "desc" }],
+          take: 1,
+        },
       },
     });
 
-    // Get the importedAt for display
-    const periodMeta = await prisma.clientSnapshot.findFirst({
-      where: { year: chosenPeriod.year, month: chosenPeriod.month },
-      orderBy: { importedAt: "desc" },
-      select: { importedAt: true },
-    });
+    const filteredClients = clients.filter(
+      (c) => !isExcluded({ groupName: c.groupName }, exclusionRules)
+    );
+
+    let latestImportDate: Date | null = null;
+    let latestYear = 0;
+    let latestMonth = 0;
 
     const carrierMap = new Map<
       string,
@@ -81,13 +51,22 @@ export async function GET() {
 
     let activeCompanies = 0;
 
-    for (const snapshot of snapshots) {
-      // Skip excluded clients
-      if (isExcluded({ groupName: snapshot.client.groupName }, exclusionRules)) {
-        continue;
+    for (const client of filteredClients) {
+      const snapshot = client.snapshots[0];
+      if (!snapshot) continue;
+
+      if (!latestImportDate || snapshot.importedAt > latestImportDate) {
+        latestImportDate = snapshot.importedAt;
+      }
+      if (
+        snapshot.year > latestYear ||
+        (snapshot.year === latestYear && snapshot.month > latestMonth)
+      ) {
+        latestYear = snapshot.year;
+        latestMonth = snapshot.month;
       }
 
-      // Build plan lookup from BenefitPlan records: planIdentifier/planName → carrier
+      // Build plan lookup from BenefitPlan records
       const planLookup = new Map<string, { carrier: string; planName: string }>();
       for (const bp of snapshot.benefitPlans) {
         if (isExcluded({ carrier: bp.carrier, planName: bp.planName, planType: bp.planType }, exclusionRules)) {
@@ -96,7 +75,6 @@ export async function GET() {
         const carrier = bp.carrier || "Unknown";
         const info = { carrier, planName: bp.planName || "" };
 
-        // Extract PlanIdentifier from metadata
         if (bp.metadata) {
           try {
             const meta = JSON.parse(bp.metadata);
@@ -111,12 +89,10 @@ export async function GET() {
 
       let companyHasData = false;
 
-      // Walk only active employees
       for (const emp of snapshot.employees) {
         const status = (emp.status || "Active").toLowerCase();
         if (status !== "active") continue;
 
-        // Parse enrollments from employee metadata
         if (!emp.metadata) continue;
         let meta: any;
         try {
@@ -126,14 +102,11 @@ export async function GET() {
         const enrollments = findEnrollmentsFromMeta(meta);
 
         for (const enrollment of enrollments) {
-          // Skip declined
           if (enrollment.DeclineReason || enrollment.declineReason) continue;
 
-          // Skip ended coverage
           const endDate = enrollment.CoverageEndDate || enrollment.EndDate || enrollment.EndedOn;
           if (endDate && new Date(String(endDate)) <= new Date()) continue;
 
-          // Match enrollment to a plan → carrier
           const planKey = String(
             enrollment.PlanIdentifier || enrollment.PlanId || enrollment.PlanID ||
             enrollment.PlanName || enrollment.Name || ""
@@ -141,9 +114,8 @@ export async function GET() {
           if (!planKey) continue;
 
           const planInfo = planLookup.get(planKey);
-          if (!planInfo) continue; // excluded or unrecognized plan
+          if (!planInfo) continue;
 
-          // Get MonthlyPlanCost from the enrollment
           const cost = parseFloat(String(
             enrollment.MonthlyPlanCost || enrollment.PlanCost || enrollment.TotalPremium ||
             enrollment.Premium || enrollment.MonthlyPremium || enrollment.EmployeePremium ||
@@ -164,7 +136,7 @@ export async function GET() {
           }
 
           entry.enrolled += 1;
-          entry.companies.add(snapshot.client.id);
+          entry.companies.add(client.id);
           entry.plans.add(`${carrierName}::${planInfo.planName}`);
           if (!isNaN(cost)) {
             entry.totalPremium += cost;
@@ -197,14 +169,17 @@ export async function GET() {
       }),
       { enrolled: 0, companies: 0, plans: 0, totalPremium: 0 }
     );
-    // Use deduplicated company count
     totals.companies = activeCompanies;
+
+    const dataPeriod = latestYear > 0
+      ? `${latestYear}-${String(latestMonth).padStart(2, "0")}`
+      : null;
 
     return NextResponse.json({
       rows,
       totals,
-      lastUpload: periodMeta?.importedAt.toISOString() || null,
-      dataPeriod: `${chosenPeriod.year}-${String(chosenPeriod.month).padStart(2, "0")}`,
+      lastUpload: latestImportDate?.toISOString() || null,
+      dataPeriod,
     });
   } catch (error) {
     console.error("Benefits report error:", error);
