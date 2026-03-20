@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import "./globals.css";
+import { SideNav } from "./side-nav";
 
 export const metadata: Metadata = {
   title: "AMS - Agency Management System",
@@ -13,29 +14,13 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en">
-      <body className="bg-gray-50 text-gray-900 min-h-screen">
-        <nav className="bg-white border-b border-gray-200 px-6 py-3">
-          <div className="max-w-7xl mx-auto flex items-center justify-between">
-            <a href="/" className="text-xl font-bold text-gray-900">
-              AMS
-            </a>
-            <div className="flex gap-6">
-              <a href="/" className="text-sm font-medium text-gray-700 hover:text-gray-900">
-                Clients
-              </a>
-              <a href="/reports" className="text-sm font-medium text-gray-700 hover:text-gray-900">
-                Reports
-              </a>
-              <a href="/import" className="text-sm font-medium text-gray-700 hover:text-gray-900">
-                Import
-              </a>
-              <a href="/rules" className="text-sm font-medium text-gray-700 hover:text-gray-900">
-                Rules
-              </a>
-            </div>
+      <body className="bg-bob-bg text-bob-text min-h-screen flex">
+        <SideNav />
+        <main className="flex-1 ml-[72px] min-h-screen">
+          <div className="max-w-6xl mx-auto px-8 py-8">
+            {children}
           </div>
-        </nav>
-        <main className="max-w-7xl mx-auto px-6 py-8">{children}</main>
+        </main>
       </body>
     </html>
   );

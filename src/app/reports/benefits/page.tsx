@@ -62,14 +62,12 @@ function toExcelXML(rows: CarrierRow[], totals: Totals): string {
 <Worksheet ss:Name="Benefits Report">
 <Table>`;
 
-  // Header row
   xml += "<Row>";
   headers.forEach((h) => {
     xml += `<Cell ss:StyleID="Bold"><Data ss:Type="String">${escXml(h)}</Data></Cell>`;
   });
   xml += "</Row>";
 
-  // Data rows
   for (const r of rows) {
     xml += "<Row>";
     xml += `<Cell><Data ss:Type="String">${escXml(r.carrier)}</Data></Cell>`;
@@ -80,7 +78,6 @@ function toExcelXML(rows: CarrierRow[], totals: Totals): string {
     xml += "</Row>";
   }
 
-  // Totals row
   xml += "<Row>";
   xml += `<Cell ss:StyleID="Bold"><Data ss:Type="String">-- Total --</Data></Cell>`;
   xml += `<Cell ss:StyleID="Bold"><Data ss:Type="Number">${totals.enrolled}</Data></Cell>`;
@@ -116,12 +113,10 @@ export default function BenefitsReportPage() {
       .finally(() => setLoading(false));
   }, []);
 
-  // Filter
   const filtered = rows.filter(
     (r) => !search || r.carrier.toLowerCase().includes(search.toLowerCase())
   );
 
-  // Sort
   const sorted = [...filtered].sort((a, b) => {
     const aVal = a[sortKey];
     const bVal = b[sortKey];
@@ -132,7 +127,6 @@ export default function BenefitsReportPage() {
     return sortDir === "asc" ? diff : -diff;
   });
 
-  // Recalculate totals for filtered rows
   const displayTotals = filtered.reduce(
     (acc, r) => ({
       enrolled: acc.enrolled + r.enrolled,
@@ -155,8 +149,8 @@ export default function BenefitsReportPage() {
   function SortIcon({ column }: { column: SortKey }) {
     if (sortKey !== column) return <ArrowUpDown className="w-3.5 h-3.5 text-gray-400 ml-1 inline" />;
     return sortDir === "asc"
-      ? <ArrowUp className="w-3.5 h-3.5 text-blue-600 ml-1 inline" />
-      : <ArrowDown className="w-3.5 h-3.5 text-blue-600 ml-1 inline" />;
+      ? <ArrowUp className="w-3.5 h-3.5 text-bob-purple ml-1 inline" />
+      : <ArrowDown className="w-3.5 h-3.5 text-bob-purple ml-1 inline" />;
   }
 
   function handleCSV() {
@@ -177,7 +171,7 @@ export default function BenefitsReportPage() {
     const tableHTML = tableRef.current?.querySelector("table")?.outerHTML || "";
     printWindow.document.write(`<!DOCTYPE html><html><head><title>Benefits Report</title>
 <style>
-  body { font-family: Arial, sans-serif; margin: 20px; }
+  body { font-family: Inter, Arial, sans-serif; margin: 20px; }
   h1 { font-size: 18px; margin-bottom: 16px; }
   table { border-collapse: collapse; width: 100%; font-size: 13px; }
   th, td { border: 1px solid #ddd; padding: 8px 12px; text-align: left; }
@@ -192,124 +186,105 @@ ${tableHTML}
     printWindow.print();
   }
 
-  const uploadDate = lastUpload ? new Date(lastUpload) : null;
-  const uploadLabel = uploadDate
-    ? uploadDate.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }) +
-      " at " +
-      uploadDate.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })
-    : null;
-
   return (
     <div>
-      <a href="/reports" className="inline-flex items-center gap-1 text-sm text-gray-500 hover:text-gray-700 mb-3">
-        <ArrowLeft className="w-4 h-4" /> Back to Reports
+      <a href="/reports" className="inline-flex items-center gap-1.5 text-sm text-bob-text-soft hover:text-bob-purple transition-colors duration-200 mb-4">
+        <ArrowLeft className="w-4 h-4" /> Back to Insights
       </a>
-      <h1 className="text-2xl font-bold mb-1">Benefits Report</h1>
-      <p className="text-sm text-gray-500 mb-4">
-        Carrier-level summary of actively enrolled employees and premiums from the most current data period.
-      </p>
+
+      <div className="mb-8">
+        <h1 className="text-3xl font-bold tracking-tight text-bob-text">Benefits Report</h1>
+        <p className="text-bob-text-soft mt-1">
+          Carrier-level summary of actively enrolled employees and premiums
+        </p>
+      </div>
 
       {/* Verified banner */}
       {dataPeriod && (
-        <div className="flex items-center gap-2 bg-green-50 border border-green-200 rounded-lg px-4 py-2.5 mb-5">
-          <CheckCircle className="w-5 h-5 text-green-600 flex-shrink-0" />
-          <span className="text-sm text-green-800">
+        <div className="flex items-center gap-3 bg-bob-green-light/50 border border-bob-green/20 rounded-2xl px-5 py-3.5 mb-6">
+          <div className="w-8 h-8 rounded-xl bg-white flex items-center justify-center flex-shrink-0">
+            <CheckCircle className="w-4 h-4 text-bob-green" />
+          </div>
+          <span className="text-sm text-emerald-800">
             <span className="font-semibold">Verified</span> — Data period: {dataPeriod}. Showing active enrolled employees only. Exclusion rules applied.
           </span>
         </div>
       )}
 
       {/* Export buttons + search */}
-      <div className="flex items-center justify-between mb-4 flex-wrap gap-3">
+      <div className="flex items-center justify-between mb-5 flex-wrap gap-3">
         <div className="flex gap-2">
-          <button
-            onClick={handleCSV}
-            className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 transition-colors"
-          >
-            <Download className="w-4 h-4" /> CSV
-          </button>
-          <button
-            onClick={handleExcel}
-            className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 transition-colors"
-          >
-            <Download className="w-4 h-4" /> Excel
-          </button>
-          <button
-            onClick={handlePrint}
-            className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 transition-colors"
-          >
-            <Printer className="w-4 h-4" /> Print
-          </button>
+          {[
+            { label: "CSV", icon: <Download className="w-4 h-4" />, action: handleCSV },
+            { label: "Excel", icon: <Download className="w-4 h-4" />, action: handleExcel },
+            { label: "Print", icon: <Printer className="w-4 h-4" />, action: handlePrint },
+          ].map((btn) => (
+            <button
+              key={btn.label}
+              onClick={btn.action}
+              className="inline-flex items-center gap-2 px-4 py-2.5 bg-white border border-bob-border text-bob-text text-sm font-medium rounded-2xl hover:border-bob-purple/30 hover:text-bob-purple transition-all duration-200"
+            >
+              {btn.icon} {btn.label}
+            </button>
+          ))}
         </div>
         <div className="relative">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+          <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-bob-text-soft" />
           <input
             type="text"
-            placeholder="Search Report"
+            placeholder="Search carriers..."
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            className="pl-10 pr-4 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 w-64"
+            className="pl-11 pr-4 py-2.5 bg-white border border-bob-border rounded-2xl text-sm focus:outline-none focus:ring-2 focus:ring-bob-purple/30 focus:border-bob-purple transition-all duration-200 w-64 placeholder:text-gray-400"
           />
         </div>
       </div>
 
       {/* Table */}
       {loading ? (
-        <div className="text-center py-12 text-gray-500">Loading report...</div>
+        <div className="text-center py-16 text-bob-text-soft">
+          <div className="w-8 h-8 border-2 border-bob-purple border-t-transparent rounded-full animate-spin mx-auto mb-3" />
+          Loading report...
+        </div>
       ) : (
-        <div ref={tableRef} className="bg-white rounded-lg border border-gray-200 overflow-hidden">
+        <div ref={tableRef} className="bg-white rounded-2xl border border-bob-border overflow-hidden">
           <table className="w-full text-sm">
-            <thead className="bg-gray-50 border-b border-gray-200">
+            <thead className="bg-bob-bg border-b border-bob-border">
               <tr>
-                <th
-                  className="text-left px-5 py-3 font-medium text-gray-500 cursor-pointer hover:text-gray-700 select-none"
-                  onClick={() => handleSort("carrier")}
-                >
-                  Carrier <SortIcon column="carrier" />
-                </th>
-                <th
-                  className="text-right px-5 py-3 font-medium text-gray-500 cursor-pointer hover:text-gray-700 select-none"
-                  onClick={() => handleSort("enrolled")}
-                >
-                  Enrolled Employees <SortIcon column="enrolled" />
-                </th>
-                <th
-                  className="text-right px-5 py-3 font-medium text-gray-500 cursor-pointer hover:text-gray-700 select-none"
-                  onClick={() => handleSort("companies")}
-                >
-                  Companies <SortIcon column="companies" />
-                </th>
-                <th
-                  className="text-right px-5 py-3 font-medium text-gray-500 cursor-pointer hover:text-gray-700 select-none"
-                  onClick={() => handleSort("plans")}
-                >
-                  Plans <SortIcon column="plans" />
-                </th>
-                <th
-                  className="text-right px-5 py-3 font-medium text-gray-500 cursor-pointer hover:text-gray-700 select-none"
-                  onClick={() => handleSort("totalPremium")}
-                >
-                  Total Premium <SortIcon column="totalPremium" />
-                </th>
+                {([
+                  { key: "carrier" as SortKey, label: "Carrier", align: "text-left" },
+                  { key: "enrolled" as SortKey, label: "Enrolled Employees", align: "text-right" },
+                  { key: "companies" as SortKey, label: "Companies", align: "text-right" },
+                  { key: "plans" as SortKey, label: "Plans", align: "text-right" },
+                  { key: "totalPremium" as SortKey, label: "Total Premium", align: "text-right" },
+                ]).map((col) => (
+                  <th
+                    key={col.key}
+                    className={`${col.align} px-6 py-4 font-semibold text-bob-text-soft cursor-pointer hover:text-bob-text select-none transition-colors duration-200`}
+                    onClick={() => handleSort(col.key)}
+                  >
+                    {col.label} <SortIcon column={col.key} />
+                  </th>
+                ))}
               </tr>
             </thead>
-            <tbody className="divide-y divide-gray-200">
+            <tbody className="divide-y divide-bob-border-light">
               {sorted.map((row) => (
-                <tr key={row.carrier} className="hover:bg-gray-50">
-                  <td className="px-5 py-3 font-medium text-blue-700">{row.carrier}</td>
-                  <td className="px-5 py-3 text-right">{row.enrolled.toLocaleString()}</td>
-                  <td className="px-5 py-3 text-right">{row.companies.toLocaleString()}</td>
-                  <td className="px-5 py-3 text-right">{row.plans.toLocaleString()}</td>
-                  <td className="px-5 py-3 text-right">{formatCurrency(row.totalPremium)}</td>
+                <tr key={row.carrier} className="hover:bg-bob-bg/50 transition-colors duration-150">
+                  <td className="px-6 py-4 font-semibold text-bob-purple">{row.carrier}</td>
+                  <td className="px-6 py-4 text-right font-medium">{row.enrolled.toLocaleString()}</td>
+                  <td className="px-6 py-4 text-right font-medium">{row.companies.toLocaleString()}</td>
+                  <td className="px-6 py-4 text-right font-medium">{row.plans.toLocaleString()}</td>
+                  <td className="px-6 py-4 text-right font-semibold">{formatCurrency(row.totalPremium)}</td>
                 </tr>
               ))}
               {/* Totals row */}
-              <tr className="bg-gray-50 font-semibold">
-                <td className="px-5 py-3 text-gray-700">-- Total --</td>
-                <td className="px-5 py-3 text-right">{displayTotals.enrolled.toLocaleString()}</td>
-                <td className="px-5 py-3 text-right">{displayTotals.companies.toLocaleString()}</td>
-                <td className="px-5 py-3 text-right">{displayTotals.plans.toLocaleString()}</td>
-                <td className="px-5 py-3 text-right">{formatCurrency(displayTotals.totalPremium)}</td>
+              <tr className="bg-bob-bg font-bold">
+                <td className="px-6 py-4 text-bob-text">Total</td>
+                <td className="px-6 py-4 text-right">{displayTotals.enrolled.toLocaleString()}</td>
+                <td className="px-6 py-4 text-right">{displayTotals.companies.toLocaleString()}</td>
+                <td className="px-6 py-4 text-right">{displayTotals.plans.toLocaleString()}</td>
+                <td className="px-6 py-4 text-right">{formatCurrency(displayTotals.totalPremium)}</td>
               </tr>
             </tbody>
           </table>

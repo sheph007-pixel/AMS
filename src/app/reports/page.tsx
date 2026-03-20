@@ -1,6 +1,6 @@
 "use client";
 
-import { FileBarChart, ChevronRight } from "lucide-react";
+import { ChevronRight } from "lucide-react";
 
 const reports = [
   {
@@ -8,34 +8,46 @@ const reports = [
     name: "Benefits Report",
     description: "Carrier-level summary of eligible/enrolled employees, plans, and costs from the latest upload",
     href: "/reports/benefits",
+    color: "from-bob-purple to-bob-blue",
+    iconBg: "bg-bob-purple-light",
+    icon: (
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#7C5CFC" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+        <rect x="3" y="3" width="18" height="18" rx="2" />
+        <path d="M8 15V9" /><path d="M12 15v-4" /><path d="M16 15v-6" />
+      </svg>
+    ),
   },
 ];
 
 export default function ReportsPage() {
   return (
     <div>
-      <h1 className="text-2xl font-bold mb-1">Reports</h1>
-      <p className="text-sm text-gray-500 mb-6">
-        Select a report to view current data summaries and export options.
-      </p>
+      <div className="mb-8">
+        <h1 className="text-3xl font-bold tracking-tight text-bob-text">Insights</h1>
+        <p className="text-bob-text-soft mt-1">
+          Dive into your data with beautiful, shareable reports
+        </p>
+      </div>
 
-      <div className="bg-white rounded-lg border border-gray-200 divide-y divide-gray-200">
+      <div className="grid gap-4 stagger-children">
         {reports.map((report) => (
           <a
             key={report.id}
             href={report.href}
-            className="flex items-center justify-between px-5 py-4 hover:bg-gray-50 transition-colors"
+            className="group bg-white rounded-2xl border border-bob-border p-6 hover:shadow-md hover:border-bob-purple/20 transition-all duration-200 flex items-center justify-between"
           >
-            <div className="flex items-center gap-4">
-              <div className="w-10 h-10 bg-blue-50 rounded-lg flex items-center justify-center">
-                <FileBarChart className="w-5 h-5 text-blue-600" />
+            <div className="flex items-center gap-5">
+              <div className={`w-14 h-14 rounded-2xl ${report.iconBg} flex items-center justify-center group-hover:scale-105 transition-transform duration-200`}>
+                {report.icon}
               </div>
               <div>
-                <p className="font-semibold text-gray-900">{report.name}</p>
-                <p className="text-sm text-gray-500">{report.description}</p>
+                <p className="font-semibold text-lg text-bob-text group-hover:text-bob-purple transition-colors duration-200">
+                  {report.name}
+                </p>
+                <p className="text-sm text-bob-text-soft mt-0.5">{report.description}</p>
               </div>
             </div>
-            <ChevronRight className="w-4 h-4 text-gray-400" />
+            <ChevronRight className="w-5 h-5 text-gray-300 group-hover:text-bob-purple group-hover:translate-x-0.5 transition-all duration-200" />
           </a>
         ))}
       </div>
