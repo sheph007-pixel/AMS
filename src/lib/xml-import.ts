@@ -165,6 +165,9 @@ export async function importAnnualXml(
       },
     });
 
+    // --- Count enrollees per plan from employee enrollment data ---
+    const enrolleeCountByPlan = countEnrolleesByPlan(employees);
+
     // --- Import benefit plans ---
     for (const plan of plans) {
       const planType = derivePlanType(plan);
@@ -172,7 +175,16 @@ export async function importAnnualXml(
       const planName = extractField(plan, "PlanName", "Name");
       const policyNumber = extractField(plan, "PolicyNumber");
       const groupNumber = extractField(plan, "GroupNumber");
-      const monthlyCost = parseFloatSafe(extractField(plan, "MonthlyPlanCost"));
+      const planIdentifier = extractField(plan, "PlanIdentifier");
+      const monthlyCost = parseFloatSafe(
+        extractField(plan, "MonthlyPlanCost", "PlanCost", "TotalPremium",
+          "Premium", "MonthlyPremium", "Cost", "Rate")
+      );
+
+      // Match enrollees: try PlanIdentifier, then fall back to PlanName
+      const enrolleeCount = (planIdentifier && enrolleeCountByPlan.get(planIdentifier))
+        || (planName && enrolleeCountByPlan.get(planName))
+        || null;
 
       await prisma.benefitPlan.create({
         data: {
@@ -180,12 +192,12 @@ export async function importAnnualXml(
           planType,
           carrier,
           planName,
-          enrollees: null, // Will be derived from employee enrollments
+          enrollees: enrolleeCount,
           premium: monthlyCost,
           metadata: JSON.stringify({
             policyNumber,
             groupNumber,
-            planIdentifier: extractField(plan, "PlanIdentifier"),
+            planIdentifier,
             carrierPlanCode: extractField(plan, "CarrierPlanCode"),
             carrierPlanTypeCode: extractField(plan, "CarrierPlanTypeCode"),
             carrierBenefitCode: extractField(plan, "CarrierBenefitCode"),
@@ -432,6 +444,30 @@ function deriveCoverageTier(enrollments: any[]): string | null {
     if (level) return level;
   }
   return null;
+}
+
+/**
+ * Count how many employees are enrolled in each plan by scanning all employee enrollments.
+ * Returns a Map keyed by PlanIdentifier (or PlanName) → count.
+ */
+function countEnrolleesByPlan(employees: any[]): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const emp of employees) {
+    const enrollments = findEnrollments(emp);
+    // Track which plans this employee is enrolled in (avoid double-counting)
+    const seenPlans = new Set<string>();
+    for (const enrollment of enrollments) {
+      const planKey =
+        extractField(enrollment, "PlanIdentifier", "PlanId", "PlanID") ||
+        extractField(enrollment, "PlanName", "Name") ||
+        null;
+      if (planKey && !seenPlans.has(planKey)) {
+        seenPlans.add(planKey);
+        counts.set(planKey, (counts.get(planKey) || 0) + 1);
+      }
+    }
+  }
+  return counts;
 }
 
 function extractPlanDates(plans: any[]): { effectiveDate: string | null; renewalDate: string | null } {
