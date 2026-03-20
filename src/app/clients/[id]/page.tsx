@@ -9,6 +9,7 @@ interface BenefitPlan {
   planType: string;
   carrier: string | null;
   planName: string | null;
+  eligible: number | null;
   enrollees: number | null;
   premium: number | null;
 }
@@ -216,7 +217,8 @@ function BenefitsTab({ snapshot }: { snapshot?: Snapshot }) {
             <th className="text-left px-5 py-3 font-medium text-gray-500">Plan Type</th>
             <th className="text-left px-5 py-3 font-medium text-gray-500">Carrier</th>
             <th className="text-left px-5 py-3 font-medium text-gray-500">Plan Name</th>
-            <th className="text-right px-5 py-3 font-medium text-gray-500">Enrollees</th>
+            <th className="text-right px-5 py-3 font-medium text-gray-500">Eligible</th>
+            <th className="text-right px-5 py-3 font-medium text-gray-500">Enrolled</th>
             <th className="text-right px-5 py-3 font-medium text-gray-500">Premium</th>
           </tr>
         </thead>
@@ -226,6 +228,7 @@ function BenefitsTab({ snapshot }: { snapshot?: Snapshot }) {
               <td className="px-5 py-3 font-medium">{plan.planType}</td>
               <td className="px-5 py-3">{plan.carrier ?? "—"}</td>
               <td className="px-5 py-3">{plan.planName ?? "—"}</td>
+              <td className="px-5 py-3 text-right">{plan.eligible ?? "—"}</td>
               <td className="px-5 py-3 text-right">{plan.enrollees ?? "—"}</td>
               <td className="px-5 py-3 text-right">
                 {plan.premium != null ? `$${plan.premium.toLocaleString()}` : "—"}

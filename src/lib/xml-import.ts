@@ -157,8 +157,8 @@ export async function importAnnualXml(
       },
     });
 
-    // --- Count enrollees per plan from employee enrollment data ---
-    const enrolleeCountByPlan = countEnrolleesByPlan(employees);
+    // --- Count eligible and enrolled per plan from employee enrollment data ---
+    const { enrolled: enrolledByPlan, eligible: eligibleByPlan } = countByPlan(employees);
 
     // --- Import benefit plans (filtered by exclusion rules) ---
     for (const plan of plans) {
@@ -178,9 +178,12 @@ export async function importAnnualXml(
           "Premium", "MonthlyPremium", "Cost", "Rate")
       );
 
-      // Match enrollees: try PlanIdentifier, then fall back to PlanName
-      const enrolleeCount = (planIdentifier && enrolleeCountByPlan.get(planIdentifier))
-        || (planName && enrolleeCountByPlan.get(planName))
+      // Match eligible/enrolled: try PlanIdentifier, then fall back to PlanName
+      const enrolleeCount = (planIdentifier && enrolledByPlan.get(planIdentifier))
+        || (planName && enrolledByPlan.get(planName))
+        || null;
+      const eligibleCount = (planIdentifier && eligibleByPlan.get(planIdentifier))
+        || (planName && eligibleByPlan.get(planName))
         || null;
 
       await prisma.benefitPlan.create({
@@ -189,6 +192,7 @@ export async function importAnnualXml(
           planType,
           carrier,
           planName,
+          eligible: eligibleCount,
           enrollees: enrolleeCount,
           premium: monthlyCost,
           metadata: JSON.stringify(collectAllFields(plan)),
@@ -433,24 +437,49 @@ function isExcluded(
   return false;
 }
 
-function countEnrolleesByPlan(employees: any[]): Map<string, number> {
-  const counts = new Map<string, number>();
+/**
+ * Count eligible and enrolled employees per plan from enrollment data.
+ * - Enrolled: employee has an active enrollment (no EndDate or EndDate in future)
+ * - Eligible: employee has any enrollment record for the plan (including declined/ended)
+ */
+function countByPlan(employees: any[]): {
+  enrolled: Map<string, number>;
+  eligible: Map<string, number>;
+} {
+  const enrolled = new Map<string, number>();
+  const eligible = new Map<string, number>();
+
   for (const emp of employees) {
     const enrollments = findEnrollments(emp);
-    // Track which plans this employee is enrolled in (avoid double-counting)
-    const seenPlans = new Set<string>();
+    const seenEnrolled = new Set<string>();
+    const seenEligible = new Set<string>();
+
     for (const enrollment of enrollments) {
       const planKey =
         extractField(enrollment, "PlanIdentifier", "PlanId", "PlanID") ||
         extractField(enrollment, "PlanName", "Name") ||
         null;
-      if (planKey && !seenPlans.has(planKey)) {
-        seenPlans.add(planKey);
-        counts.set(planKey, (counts.get(planKey) || 0) + 1);
+      if (!planKey) continue;
+
+      // Every enrollment record means the employee is eligible
+      if (!seenEligible.has(planKey)) {
+        seenEligible.add(planKey);
+        eligible.set(planKey, (eligible.get(planKey) || 0) + 1);
+      }
+
+      // Check if actively enrolled (not declined, not ended)
+      const declineReason = extractField(enrollment, "DeclineReason");
+      const endDate = extractField(enrollment, "CoverageEndDate", "EndDate", "EndedOn");
+      const isEnded = endDate && new Date(endDate) <= new Date();
+
+      if (!declineReason && !isEnded && !seenEnrolled.has(planKey)) {
+        seenEnrolled.add(planKey);
+        enrolled.set(planKey, (enrolled.get(planKey) || 0) + 1);
       }
     }
   }
-  return counts;
+
+  return { enrolled, eligible };
 }
 
 function extractPlanDates(plans: any[]): { effectiveDate: string | null; renewalDate: string | null } {

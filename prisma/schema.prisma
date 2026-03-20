@@ -55,6 +55,7 @@ model BenefitPlan {
   planType    String  /// e.g. Medical, Dental, Vision, Life
   carrier     String?
   planName    String?
+  eligible    Int?    /// Number of employees eligible for this plan
   enrollees   Int?
   premium     Float?
   metadata    String? /// Raw plan data as JSON
