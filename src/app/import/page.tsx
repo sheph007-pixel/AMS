@@ -1,12 +1,21 @@
 "use client";
 
-import { useRef, useState } from "react";
-import { Upload, CheckCircle, AlertCircle, FileText, X, Sparkles } from "lucide-react";
+import { useEffect, useRef, useState, useCallback } from "react";
+import {
+  Upload, CheckCircle, AlertCircle, FileText, X,
+  ChevronLeft, ChevronRight, Loader2, Calendar,
+} from "lucide-react";
 
-const MONTH_NAMES = [
-  "", "January", "February", "March", "April", "May", "June",
-  "July", "August", "September", "October", "November", "December",
-];
+// ─── Types ────────────────────────────────────────────────────────────────────
+
+interface Period {
+  year: number;
+  month: number;
+  groups: number;
+  benefitPlans: number;
+  employees: number;
+  importedAt: string | null;
+}
 
 interface ImportResult {
   year: number;
@@ -19,288 +28,314 @@ interface ImportResult {
   employeesProcessed: number;
 }
 
-type ImportStatus = "idle" | "reading" | "uploading" | "processing" | "done" | "error";
+const MONTHS = [
+  "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+  "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
 
-const STEPS = [
-  { key: "reading", label: "Reading" },
-  { key: "uploading", label: "Uploading" },
-  { key: "processing", label: "Processing" },
-  { key: "done", label: "Done!" },
-] as const;
+const MONTH_FULL = [
+  "", "January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December",
+];
+
+const START_YEAR = 2022;
+const END_YEAR = new Date().getFullYear();
+const YEARS = Array.from({ length: END_YEAR - START_YEAR + 1 }, (_, i) => START_YEAR + i);
+
+// ─── Main Page ────────────────────────────────────────────────────────────────
 
 export default function ImportPage() {
+  const [periods, setPeriods] = useState<Period[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [uploading, setUploading] = useState<{ year: number; month: number } | null>(null);
+  const [uploadResult, setUploadResult] = useState<ImportResult | null>(null);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+  const [dragTarget, setDragTarget] = useState<{ year: number; month: number } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const [files, setFiles] = useState<File[]>([]);
-  const [status, setStatus] = useState<ImportStatus>("idle");
-  const [progress, setProgress] = useState(0);
-  const [result, setResult] = useState<ImportResult | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [dragActive, setDragActive] = useState(false);
+  const [pendingCell, setPendingCell] = useState<{ year: number; month: number } | null>(null);
 
-  function handleDrop(e: React.DragEvent) {
-    e.preventDefault();
-    setDragActive(false);
-    const dropped = Array.from(e.dataTransfer.files).filter((f) =>
-      f.name.toLowerCase().endsWith(".xml")
-    );
-    if (dropped.length > 0) setFiles(dropped);
+  const fetchPeriods = useCallback(() => {
+    fetch("/api/import/periods")
+      .then((r) => r.json())
+      .then((data) => setPeriods(data.periods || []))
+      .finally(() => setLoading(false));
+  }, []);
+
+  useEffect(() => {
+    fetchPeriods();
+  }, [fetchPeriods]);
+
+  // Lookup: "year-month" → Period
+  const periodMap = new Map<string, Period>();
+  for (const p of periods) {
+    periodMap.set(`${p.year}-${p.month}`, p);
   }
 
-  function handleFileSelect(e: React.ChangeEvent<HTMLInputElement>) {
-    const selected = Array.from(e.target.files || []);
-    if (selected.length > 0) setFiles(selected);
+  function getPeriod(year: number, month: number): Period | undefined {
+    return periodMap.get(`${year}-${month}`);
   }
 
-  function removeFile(index: number) {
-    setFiles((prev) => prev.filter((_, i) => i !== index));
-  }
-
-  function formatSize(bytes: number): string {
-    if (bytes < 1024) return `${bytes} B`;
-    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-  }
-
-  async function handleImport() {
-    if (files.length === 0) return;
-    setStatus("reading");
-    setProgress(10);
-    setResult(null);
-    setError(null);
+  async function handleUpload(file: File, year: number, month: number) {
+    setUploading({ year, month });
+    setUploadResult(null);
+    setUploadError(null);
 
     try {
-      await new Promise((r) => setTimeout(r, 200));
-      setProgress(20);
-
-      setStatus("uploading");
-      setProgress(30);
-
       const formData = new FormData();
-      formData.append("file", files[0]);
+      formData.append("file", file);
+      formData.append("year", String(year));
+      formData.append("month", String(month));
 
       const res = await fetch("/api/import", { method: "POST", body: formData });
-      setProgress(60);
-
-      setStatus("processing");
-      setProgress(80);
-
       const data = await res.json();
 
-      if (!res.ok) {
-        throw new Error(data.error || "Import failed");
-      }
+      if (!res.ok) throw new Error(data.error || "Import failed");
 
-      setProgress(100);
-      setStatus("done");
-      setResult(data);
+      setUploadResult(data);
+      fetchPeriods(); // Refresh grid
     } catch (err) {
-      setStatus("error");
-      setError(err instanceof Error ? err.message : "Import failed");
+      setUploadError(err instanceof Error ? err.message : "Import failed");
+    } finally {
+      setUploading(null);
     }
   }
 
-  function reset() {
-    setFiles([]);
-    setStatus("idle");
-    setProgress(0);
-    setResult(null);
-    setError(null);
+  function handleCellClick(year: number, month: number) {
+    const existing = getPeriod(year, month);
+    if (existing) return; // Already uploaded — locked
+    setPendingCell({ year, month });
+    fileInputRef.current?.click();
   }
 
-  const currentStepIndex = STEPS.findIndex((s) => s.key === status);
-  const isWorking = ["reading", "uploading", "processing"].includes(status);
+  function handleFileSelected(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (file && pendingCell) {
+      handleUpload(file, pendingCell.year, pendingCell.month);
+    }
+    setPendingCell(null);
+    if (fileInputRef.current) fileInputRef.current.value = "";
+  }
+
+  function handleCellDrop(e: React.DragEvent, year: number, month: number) {
+    e.preventDefault();
+    setDragTarget(null);
+    const existing = getPeriod(year, month);
+    if (existing) return;
+    const file = e.dataTransfer.files[0];
+    if (file && file.name.toLowerCase().endsWith(".xml")) {
+      handleUpload(file, year, month);
+    }
+  }
+
+  // Auto-detect upload: drop anywhere on page, detect date from XML
+  async function handleAutoUpload(file: File) {
+    setUploading({ year: 0, month: 0 }); // Show generic uploading state
+    setUploadResult(null);
+    setUploadError(null);
+
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+      // Don't send year/month — let the XML date detection assign it
+
+      const res = await fetch("/api/import", { method: "POST", body: formData });
+      const data = await res.json();
+
+      if (!res.ok) throw new Error(data.error || "Import failed");
+
+      setUploadResult(data);
+      fetchPeriods();
+    } catch (err) {
+      setUploadError(err instanceof Error ? err.message : "Import failed");
+    } finally {
+      setUploading(null);
+    }
+  }
+
+  // Stats
+  const totalUploaded = periods.length;
+  const totalCells = YEARS.length * 12;
+  const totalGroups = new Set(periods.map((p) => `${p.year}-${p.month}`)).size;
 
   return (
-    <div className="max-w-2xl mx-auto">
+    <div>
       <div className="mb-8">
         <h1 className="text-3xl font-bold tracking-tight text-bob-text">Upload Data</h1>
         <p className="text-bob-text-soft mt-1">
-          Bring your community to life — drop an XML file and we&apos;ll handle the rest
+          Upload XML files for each month. Data is locked once uploaded.
         </p>
       </div>
 
-      {/* File Drop Zone */}
-      {status === "idle" && (
+      {/* Quick Drop — auto-detect date */}
+      <div className="mb-6">
         <div
-          onDragOver={(e) => { e.preventDefault(); setDragActive(true); }}
-          onDragLeave={() => setDragActive(false)}
-          onDrop={handleDrop}
-          onClick={() => fileInputRef.current?.click()}
-          className={`bg-white rounded-3xl border-2 border-dashed transition-all duration-300 cursor-pointer p-12 ${
-            dragActive
-              ? "border-bob-purple bg-bob-purple-light/30 scale-[1.01]"
-              : "border-bob-border hover:border-bob-purple/40 hover:bg-gray-50"
-          }`}
+          onDragOver={(e) => { e.preventDefault(); }}
+          onDrop={(e) => {
+            e.preventDefault();
+            const file = e.dataTransfer.files[0];
+            if (file && file.name.toLowerCase().endsWith(".xml")) {
+              handleAutoUpload(file);
+            }
+          }}
+          onClick={() => {
+            setPendingCell(null); // Clear any cell selection
+            const input = document.createElement("input");
+            input.type = "file";
+            input.accept = ".xml";
+            input.onchange = (e) => {
+              const file = (e.target as HTMLInputElement).files?.[0];
+              if (file) handleAutoUpload(file);
+            };
+            input.click();
+          }}
+          className="bg-white rounded-2xl border-2 border-dashed border-bob-border hover:border-bob-purple/40 hover:bg-gray-50 transition-all duration-200 cursor-pointer p-6 text-center"
         >
-          <div className="text-center">
-            <div className={`w-16 h-16 rounded-2xl flex items-center justify-center mx-auto mb-5 transition-all duration-300 ${
-              dragActive ? "bg-bob-purple-light scale-110" : "bg-bob-bg"
-            }`}>
-              <Upload className={`w-7 h-7 transition-colors duration-300 ${dragActive ? "text-bob-purple" : "text-bob-text-soft"}`} />
-            </div>
-            <p className="text-base font-semibold text-bob-text mb-1">
-              {dragActive ? "Drop it like it's hot!" : "Drop your XML here"}
-            </p>
-            <p className="text-sm text-bob-text-soft">
-              or click to browse — Employee Navigator format
-            </p>
+          <div className="flex items-center justify-center gap-3">
+            <Upload className="w-5 h-5 text-bob-text-soft" />
+            <span className="text-sm font-medium text-bob-text-soft">
+              Drop XML here or click to auto-detect date from file
+            </span>
           </div>
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept=".xml"
-            onChange={handleFileSelect}
-            className="hidden"
-          />
         </div>
-      )}
+      </div>
 
-      {/* Selected Files */}
-      {files.length > 0 && status === "idle" && (
-        <div className="mt-5 space-y-3 animate-fade-in-up">
-          {files.map((file, i) => (
-            <div
-              key={i}
-              className="bg-white rounded-2xl border border-bob-border px-5 py-4 flex items-center justify-between"
-            >
-              <div className="flex items-center gap-4">
-                <div className="w-10 h-10 rounded-xl bg-bob-blue-light flex items-center justify-center">
-                  <FileText className="w-5 h-5 text-bob-blue" />
-                </div>
-                <div>
-                  <p className="text-sm font-semibold text-bob-text">{file.name}</p>
-                  <p className="text-xs text-bob-text-soft">{formatSize(file.size)}</p>
-                </div>
-              </div>
-              <button
-                onClick={(e) => { e.stopPropagation(); removeFile(i); }}
-                className="text-gray-300 hover:text-bob-coral transition-colors duration-200"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-          ))}
+      {/* Summary bar */}
+      <div className="flex items-center gap-6 mb-4 text-xs text-bob-text-soft">
+        <span className="flex items-center gap-1.5">
+          <span className="w-3 h-3 rounded bg-bob-green inline-block" />
+          Uploaded ({totalUploaded})
+        </span>
+        <span className="flex items-center gap-1.5">
+          <span className="w-3 h-3 rounded bg-bob-bg border border-bob-border inline-block" />
+          Available ({totalCells - totalUploaded})
+        </span>
+      </div>
 
-          <button
-            onClick={handleImport}
-            className="w-full bg-gradient-to-r from-bob-purple to-bob-blue text-white py-3.5 px-4 rounded-2xl text-sm font-semibold hover:opacity-90 transition-opacity duration-200 shadow-sm"
-          >
-            Start Import
-          </button>
+      {/* Year/Month Grid */}
+      {loading ? (
+        <div className="text-center py-16 text-bob-text-soft">
+          <Loader2 className="w-8 h-8 animate-spin mx-auto mb-3 text-bob-purple" />
+          Loading data periods...
         </div>
-      )}
+      ) : (
+        <div className="bg-white rounded-2xl border border-bob-border overflow-hidden">
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead className="bg-bob-bg border-b border-bob-border">
+                <tr>
+                  <th className="px-4 py-3 text-left font-semibold text-bob-text-soft text-xs w-20">Year</th>
+                  {MONTHS.map((m) => (
+                    <th key={m} className="px-2 py-3 text-center font-semibold text-bob-text-soft text-xs">{m}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-bob-border-light">
+                {YEARS.map((year) => (
+                  <tr key={year} className="hover:bg-bob-bg/30 transition-colors">
+                    <td className="px-4 py-2 font-semibold text-bob-text text-sm">{year}</td>
+                    {Array.from({ length: 12 }, (_, i) => i + 1).map((month) => {
+                      const period = getPeriod(year, month);
+                      const isUploading = uploading?.year === year && uploading?.month === month;
+                      const isDragOver = dragTarget?.year === year && dragTarget?.month === month;
+                      const hasData = !!period;
 
-      {/* Progress Tracker */}
-      {(isWorking || status === "done") && (
-        <div className="bg-white rounded-3xl border border-bob-border p-8 mt-5 animate-fade-in">
-          <div className="flex items-center gap-3 mb-6">
-            <div className="w-10 h-10 rounded-xl bg-bob-blue-light flex items-center justify-center">
-              <FileText className="w-5 h-5 text-bob-blue" />
-            </div>
-            <span className="text-sm font-semibold text-bob-text">{files[0]?.name}</span>
-          </div>
-
-          {/* Progress bar */}
-          <div className="h-2.5 bg-bob-bg rounded-full overflow-hidden mb-8">
-            <div
-              className={`h-full rounded-full transition-all duration-700 ease-out ${
-                status === "done"
-                  ? "bg-gradient-to-r from-bob-green to-bob-teal"
-                  : "bg-gradient-to-r from-bob-purple to-bob-blue"
-              }`}
-              style={{ width: `${progress}%` }}
-            />
-          </div>
-
-          {/* Steps */}
-          <div className="flex justify-between">
-            {STEPS.map((step, i) => {
-              const isActive = step.key === status;
-              const isComplete = i < currentStepIndex || status === "done";
-              return (
-                <div key={step.key} className="flex items-center gap-2">
-                  <div
-                    className={`w-7 h-7 rounded-full flex items-center justify-center text-xs font-semibold transition-all duration-300 ${
-                      isComplete
-                        ? "bg-bob-green text-white"
-                        : isActive
-                        ? "bg-bob-purple text-white animate-pulse-dot"
-                        : "bg-bob-bg text-gray-400"
-                    }`}
-                  >
-                    {isComplete ? "✓" : i + 1}
-                  </div>
-                  <span
-                    className={`text-xs font-medium ${
-                      isActive ? "text-bob-text" : isComplete ? "text-bob-green" : "text-gray-400"
-                    }`}
-                  >
-                    {step.label}
-                  </span>
-                </div>
-              );
-            })}
+                      return (
+                        <td key={month} className="px-1 py-2">
+                          <div
+                            onClick={() => !hasData && !isUploading && handleCellClick(year, month)}
+                            onDragOver={(e) => {
+                              if (!hasData) {
+                                e.preventDefault();
+                                setDragTarget({ year, month });
+                              }
+                            }}
+                            onDragLeave={() => setDragTarget(null)}
+                            onDrop={(e) => handleCellDrop(e, year, month)}
+                            className={`rounded-lg px-2 py-2.5 text-center transition-all duration-200 min-h-[52px] flex flex-col items-center justify-center ${
+                              hasData
+                                ? "bg-emerald-50 border border-emerald-200 cursor-default"
+                                : isUploading
+                                ? "bg-bob-purple-light border border-bob-purple/30"
+                                : isDragOver
+                                ? "bg-bob-purple-light/50 border-2 border-dashed border-bob-purple scale-105"
+                                : "bg-bob-bg/50 border border-dashed border-bob-border hover:border-bob-purple/40 hover:bg-bob-purple-light/20 cursor-pointer"
+                            }`}
+                            title={
+                              hasData
+                                ? `${period.groups} groups, ${period.employees.toLocaleString()} employees\nUploaded: ${period.importedAt ? new Date(period.importedAt).toLocaleDateString() : "—"}`
+                                : `Upload ${MONTH_FULL[month]} ${year}`
+                            }
+                          >
+                            {isUploading ? (
+                              <Loader2 className="w-4 h-4 animate-spin text-bob-purple" />
+                            ) : hasData ? (
+                              <>
+                                <CheckCircle className="w-3.5 h-3.5 text-emerald-500 mb-0.5" />
+                                <span className="text-[10px] font-semibold text-emerald-700">{period.groups}</span>
+                              </>
+                            ) : (
+                              <Upload className="w-3.5 h-3.5 text-gray-300" />
+                            )}
+                          </div>
+                        </td>
+                      );
+                    })}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         </div>
       )}
 
-      {/* Success Result */}
-      {status === "done" && result && (
-        <div className="mt-5 bg-gradient-to-br from-bob-green-light to-bob-teal-light rounded-3xl border border-bob-green/20 p-8 animate-celebrate">
-          <div className="flex items-center gap-3 mb-5">
-            <div className="w-10 h-10 rounded-xl bg-white flex items-center justify-center">
-              <Sparkles className="w-5 h-5 text-bob-green" />
-            </div>
-            <div>
-              <span className="font-bold text-emerald-800">All done!</span>
-              {result.detectedDate && (
-                <p className="text-sm text-emerald-600">
-                  Detected: {result.month ? `${MONTH_NAMES[result.month]} ${result.year}` : result.year}
-                </p>
-              )}
-            </div>
-          </div>
+      {/* Hidden file input for cell clicks */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept=".xml"
+        onChange={handleFileSelected}
+        className="hidden"
+      />
 
-          <div className="grid grid-cols-2 gap-3">
-            {[
-              { label: "Groups processed", value: result.clientsProcessed },
-              { label: "New groups", value: result.clientsCreated },
-              { label: "Updated", value: result.clientsUpdated },
-              { label: "Benefit plans", value: result.benefitPlansCreated },
-              { label: "People", value: result.employeesProcessed },
-            ].map((stat) => (
-              <div key={stat.label} className="bg-white/80 backdrop-blur-sm rounded-2xl px-4 py-3.5">
-                <p className="text-xs font-medium text-emerald-600">{stat.label}</p>
-                <p className="text-xl font-bold text-emerald-800">{stat.value.toLocaleString()}</p>
-              </div>
-            ))}
+      {/* Upload result toast */}
+      {uploadResult && (
+        <div className="fixed bottom-6 right-6 bg-white rounded-2xl border border-bob-border shadow-lg p-5 max-w-sm animate-fade-in-up z-50">
+          <div className="flex items-start gap-3">
+            <div className="w-8 h-8 rounded-lg bg-emerald-50 flex items-center justify-center flex-shrink-0">
+              <CheckCircle className="w-4 h-4 text-emerald-500" />
+            </div>
+            <div className="flex-1">
+              <p className="font-semibold text-bob-text text-sm">Upload complete</p>
+              <p className="text-xs text-bob-text-soft mt-0.5">
+                {uploadResult.month
+                  ? `${MONTH_FULL[uploadResult.month]} ${uploadResult.year}`
+                  : `${uploadResult.year}`}
+                {" — "}
+                {uploadResult.clientsProcessed} groups, {uploadResult.employeesProcessed.toLocaleString()} employees
+              </p>
+            </div>
+            <button onClick={() => setUploadResult(null)} className="text-gray-300 hover:text-gray-500">
+              <X className="w-4 h-4" />
+            </button>
           </div>
-
-          <button
-            onClick={reset}
-            className="mt-5 w-full bg-white text-bob-text py-3 px-4 rounded-2xl text-sm font-semibold hover:bg-gray-50 transition-colors duration-200 border border-bob-border"
-          >
-            Upload another file
-          </button>
         </div>
       )}
 
-      {/* Error */}
-      {status === "error" && (
-        <div className="mt-5 bg-bob-coral-light rounded-3xl border border-bob-coral/20 p-8 animate-fade-in">
-          <div className="flex items-center gap-3 mb-3">
-            <div className="w-10 h-10 rounded-xl bg-white flex items-center justify-center">
-              <AlertCircle className="w-5 h-5 text-bob-coral" />
+      {/* Upload error toast */}
+      {uploadError && (
+        <div className="fixed bottom-6 right-6 bg-white rounded-2xl border border-red-200 shadow-lg p-5 max-w-sm animate-fade-in-up z-50">
+          <div className="flex items-start gap-3">
+            <div className="w-8 h-8 rounded-lg bg-red-50 flex items-center justify-center flex-shrink-0">
+              <AlertCircle className="w-4 h-4 text-red-500" />
             </div>
-            <span className="font-bold text-red-800">Something went wrong</span>
+            <div className="flex-1">
+              <p className="font-semibold text-bob-text text-sm">Upload failed</p>
+              <p className="text-xs text-red-600 mt-0.5">{uploadError}</p>
+            </div>
+            <button onClick={() => setUploadError(null)} className="text-gray-300 hover:text-gray-500">
+              <X className="w-4 h-4" />
+            </button>
           </div>
-          <p className="text-sm text-red-700 mb-5 ml-[52px]">{error}</p>
-          <button
-            onClick={reset}
-            className="ml-[52px] bg-white border border-bob-border text-bob-text py-2.5 px-5 rounded-2xl text-sm font-semibold hover:bg-gray-50 transition-colors duration-200"
-          >
-            Try again
-          </button>
         </div>
       )}
     </div>
