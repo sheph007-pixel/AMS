@@ -4,8 +4,8 @@ import { getExclusionRules, isExcluded } from "@/lib/exclusions";
 
 /**
  * Benefits Report: aggregates benefit plan data by carrier across the latest snapshot
- * for each client. Returns per-carrier totals for eligible, enrolled, companies, plans,
- * employee costs, and plan costs.
+ * for each client. Only counts actively enrolled employees from the most recent upload.
+ * Returns per-carrier totals for enrolled employees, companies, plans, and total premium.
  */
 export async function GET() {
   try {
@@ -15,7 +15,10 @@ export async function GET() {
     const clients = await prisma.client.findMany({
       include: {
         snapshots: {
-          include: { benefitPlans: true },
+          include: {
+            benefitPlans: true,
+            employees: { select: { status: true } },
+          },
           orderBy: [{ year: "desc" }, { month: "desc" }],
           take: 1,
         },
@@ -27,23 +30,34 @@ export async function GET() {
       (c) => !isExcluded({ groupName: c.groupName }, exclusionRules)
     );
 
+    // Track the most recent import date across all snapshots
+    let latestImportDate: Date | null = null;
+
     // Aggregate by carrier
     const carrierMap = new Map<
       string,
       {
         carrier: string;
-        eligible: number;
         enrolled: number;
         companies: Set<string>;
         plans: number;
-        employeeCosts: number;
-        planCosts: number;
+        totalPremium: number;
       }
     >();
 
     for (const client of filteredClients) {
       const snapshot = client.snapshots[0];
       if (!snapshot) continue;
+
+      // Track latest import date
+      if (!latestImportDate || snapshot.importedAt > latestImportDate) {
+        latestImportDate = snapshot.importedAt;
+      }
+
+      // Count active employees in this snapshot
+      const activeEmployeeCount = snapshot.employees.filter(
+        (e) => !e.status || e.status.toLowerCase() === "active"
+      ).length;
 
       for (const plan of snapshot.benefitPlans) {
         // Apply exclusion rules to plans
@@ -61,21 +75,19 @@ export async function GET() {
         if (!entry) {
           entry = {
             carrier: carrierName,
-            eligible: 0,
             enrolled: 0,
             companies: new Set(),
             plans: 0,
-            employeeCosts: 0,
-            planCosts: 0,
+            totalPremium: 0,
           };
           carrierMap.set(carrierName, entry);
         }
 
-        entry.eligible += plan.eligible ?? 0;
+        // Use enrollees count from plan (computed at import from active enrollments)
         entry.enrolled += plan.enrollees ?? 0;
         entry.companies.add(client.id);
         entry.plans += 1;
-        entry.planCosts += plan.premium ?? 0;
+        entry.totalPremium += plan.premium ?? 0;
       }
     }
 
@@ -83,29 +95,29 @@ export async function GET() {
     const rows = Array.from(carrierMap.values())
       .map((entry) => ({
         carrier: entry.carrier,
-        eligible: entry.eligible,
         enrolled: entry.enrolled,
         companies: entry.companies.size,
         plans: entry.plans,
-        employeeCosts: entry.employeeCosts,
-        planCosts: entry.planCosts,
+        totalPremium: entry.totalPremium,
       }))
       .sort((a, b) => a.carrier.localeCompare(b.carrier));
 
     // Compute totals
     const totals = rows.reduce(
       (acc, r) => ({
-        eligible: acc.eligible + r.eligible,
         enrolled: acc.enrolled + r.enrolled,
         companies: acc.companies,
         plans: acc.plans + r.plans,
-        employeeCosts: acc.employeeCosts + r.employeeCosts,
-        planCosts: acc.planCosts + r.planCosts,
+        totalPremium: acc.totalPremium + r.totalPremium,
       }),
-      { eligible: 0, enrolled: 0, companies: filteredClients.length, plans: 0, employeeCosts: 0, planCosts: 0 }
+      { enrolled: 0, companies: filteredClients.length, plans: 0, totalPremium: 0 }
     );
 
-    return NextResponse.json({ rows, totals });
+    return NextResponse.json({
+      rows,
+      totals,
+      lastUpload: latestImportDate?.toISOString() || null,
+    });
   } catch (error) {
     console.error("Benefits report error:", error);
     return NextResponse.json({ error: "Failed to generate report" }, { status: 500 });
