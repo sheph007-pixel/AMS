@@ -8,8 +8,15 @@ export async function GET() {
     const clients = await prisma.client.findMany({
       include: {
         snapshots: {
-          select: { year: true, totalEmployees: true, totalMembers: true },
-          orderBy: { year: "asc" },
+          select: {
+            year: true,
+            month: true,
+            totalEmployees: true,
+            totalMembers: true,
+            effectiveDate: true,
+            renewalDate: true,
+          },
+          orderBy: [{ year: "asc" }, { month: "asc" }],
         },
       },
       orderBy: { groupName: "asc" },
@@ -31,9 +38,13 @@ export async function GET() {
 
     const enriched = filteredClients.map((client) => {
       const years = client.snapshots.map((s) => s.year);
-      const status = deriveLifecycleStatus(years, allSystemYears);
-      const firstYear = years.length > 0 ? Math.min(...years) : null;
-      const lastYear = years.length > 0 ? Math.max(...years) : null;
+      const uniqueYears = [...new Set(years)];
+      const status = deriveLifecycleStatus(uniqueYears, allSystemYears);
+      const firstYear = uniqueYears.length > 0 ? Math.min(...uniqueYears) : null;
+      const lastYear = uniqueYears.length > 0 ? Math.max(...uniqueYears) : null;
+
+      // Get the latest snapshot for employee/member counts
+      const latestSnapshot = client.snapshots[client.snapshots.length - 1] || null;
 
       return {
         id: client.id,
@@ -41,10 +52,14 @@ export async function GET() {
         groupName: client.groupName,
         sicCode: client.sicCode,
         state: client.state,
-        years,
+        years: uniqueYears,
         firstYear,
         lastYear,
         status,
+        totalEmployees: latestSnapshot?.totalEmployees ?? null,
+        totalMembers: latestSnapshot?.totalMembers ?? null,
+        effectiveDate: latestSnapshot?.effectiveDate ?? null,
+        renewalDate: latestSnapshot?.renewalDate ?? null,
       };
     });
 
