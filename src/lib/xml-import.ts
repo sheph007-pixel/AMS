@@ -17,6 +17,7 @@ interface ImportResult {
   clientsUpdated: number;
   benefitPlansCreated: number;
   employeesProcessed: number;
+  debugStructure?: unknown;
 }
 
 /**
@@ -35,6 +36,9 @@ export async function importAnnualXml(
   // Try to find the groups array - support multiple XML structures
   const groups = findGroups(parsed);
 
+  // Debug: capture the XML structure so we can see what tags are used
+  const debugStructure = describeStructure(parsed, 3);
+
   const result: ImportResult = {
     year,
     clientsProcessed: 0,
@@ -42,6 +46,7 @@ export async function importAnnualXml(
     clientsUpdated: 0,
     benefitPlansCreated: 0,
     employeesProcessed: 0,
+    debugStructure,
   };
 
   for (const group of groups) {
@@ -227,4 +232,20 @@ function parseFloatSafe(val: string | null): number | null {
   if (!val) return null;
   const n = parseFloat(val);
   return isNaN(n) ? null : n;
+}
+
+/** Recursively describe the structure of a parsed XML object (keys + types) up to maxDepth */
+function describeStructure(obj: unknown, maxDepth: number, depth = 0): unknown {
+  if (depth >= maxDepth) return typeof obj === "object" && obj !== null ? `{...${Object.keys(obj).length} keys}` : typeof obj;
+  if (Array.isArray(obj)) {
+    return { _type: `Array[${obj.length}]`, _first: obj.length > 0 ? describeStructure(obj[0], maxDepth, depth + 1) : null };
+  }
+  if (obj && typeof obj === "object") {
+    const result: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(obj)) {
+      result[key] = describeStructure(value, maxDepth, depth + 1);
+    }
+    return result;
+  }
+  return typeof obj === "string" && obj.length > 60 ? obj.substring(0, 60) + "..." : obj;
 }
