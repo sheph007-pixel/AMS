@@ -18,6 +18,7 @@ interface ImportResult {
   benefitPlansCreated: number;
   employeesProcessed: number;
   debugStructure?: unknown;
+  rawPreview?: string;
 }
 
 /**
@@ -37,7 +38,8 @@ export async function importAnnualXml(
   const groups = findGroups(parsed);
 
   // Debug: capture the XML structure so we can see what tags are used
-  const debugStructure = describeStructure(parsed, 3);
+  const debugStructure = describeStructure(parsed, 4);
+  const rawPreview = xmlContent.substring(0, 2000);
 
   const result: ImportResult = {
     year,
@@ -47,6 +49,7 @@ export async function importAnnualXml(
     benefitPlansCreated: 0,
     employeesProcessed: 0,
     debugStructure,
+    rawPreview,
   };
 
   for (const group of groups) {

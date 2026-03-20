@@ -117,12 +117,24 @@ export default function ImportPage() {
               <dd>{String(result.employeesProcessed)}</dd>
             </div>
           </dl>
-          {Number(result.clientsProcessed) === 0 && result.debugStructure && (
-            <div className="mt-3 pt-3 border-t border-green-200">
-              <p className="text-xs font-medium text-green-800 mb-1">Debug: Parsed XML structure</p>
-              <pre className="text-xs text-green-700 bg-green-100 rounded p-2 overflow-auto max-h-64 whitespace-pre-wrap">
-                {JSON.stringify(result.debugStructure, null, 2)}
-              </pre>
+          {Number(result.clientsProcessed) === 0 && (result.debugStructure || result.rawPreview) && (
+            <div className="mt-3 pt-3 border-t border-green-200 space-y-2">
+              {result.debugStructure && (
+                <>
+                  <p className="text-xs font-medium text-green-800">Debug: Parsed XML structure</p>
+                  <pre className="text-xs text-green-700 bg-green-100 rounded p-2 overflow-auto max-h-48 whitespace-pre-wrap">
+                    {JSON.stringify(result.debugStructure, null, 2)}
+                  </pre>
+                </>
+              )}
+              {result.rawPreview && (
+                <>
+                  <p className="text-xs font-medium text-green-800">Debug: Raw XML (first 2000 chars)</p>
+                  <pre className="text-xs text-green-700 bg-green-100 rounded p-2 overflow-auto max-h-48 whitespace-pre-wrap">
+                    {String(result.rawPreview)}
+                  </pre>
+                </>
+              )}
             </div>
           )}
         </div>
