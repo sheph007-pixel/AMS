@@ -104,7 +104,12 @@ export default function GroupsPage() {
       .finally(() => setLoading(false));
   }, []);
 
-  const filtered = clients.filter((c) => {
+  // Only show active groups (present in current year)
+  const activeClients = clients.filter(
+    (c) => c.status === "Active" || c.status === "New" || c.status === "Returned"
+  );
+
+  const filtered = activeClients.filter((c) => {
     if (!search) return true;
     const q = search.toLowerCase();
     return (
@@ -258,10 +263,10 @@ export default function GroupsPage() {
             <Building2 className="w-8 h-8 text-bob-purple" />
           </div>
           <p className="text-bob-text font-semibold mb-1">
-            {clients.length === 0 ? "No groups yet" : "No matches found"}
+            {activeClients.length === 0 ? "No active groups" : "No matches found"}
           </p>
           <p className="text-bob-text-soft text-sm">
-            {clients.length === 0
+            {activeClients.length === 0
               ? "Upload an XML file to get started"
               : "Try adjusting your search"}
           </p>
@@ -339,7 +344,7 @@ export default function GroupsPage() {
             </div>
           </div>
           <div className="mt-3 text-xs text-bob-text-soft">
-            Showing {sorted.length.toLocaleString()} of {clients.length.toLocaleString()} groups
+            Showing {sorted.length.toLocaleString()} of {activeClients.length.toLocaleString()} active groups
           </div>
         </>
       )}
