@@ -127,15 +127,20 @@ export default function BenefitsReportPage() {
     return sortDir === "asc" ? diff : -diff;
   });
 
-  const displayTotals = filtered.reduce(
-    (acc, r) => ({
-      enrolled: acc.enrolled + r.enrolled,
-      companies: acc.companies + r.companies,
-      plans: acc.plans + r.plans,
-      totalPremium: acc.totalPremium + r.totalPremium,
-    }),
-    { enrolled: 0, companies: 0, plans: 0, totalPremium: 0 }
-  );
+  // When no search filter is active, use the API's pre-computed totals
+  // (which correctly deduplicate companies). When filtering, recalculate from visible rows.
+  const isFiltered = search.length > 0;
+  const displayTotals = isFiltered
+    ? filtered.reduce(
+        (acc, r) => ({
+          enrolled: acc.enrolled + r.enrolled,
+          companies: acc.companies + r.companies,
+          plans: acc.plans + r.plans,
+          totalPremium: acc.totalPremium + r.totalPremium,
+        }),
+        { enrolled: 0, companies: 0, plans: 0, totalPremium: 0 }
+      )
+    : totals || { enrolled: 0, companies: 0, plans: 0, totalPremium: 0 };
 
   function handleSort(key: SortKey) {
     if (sortKey === key) {
