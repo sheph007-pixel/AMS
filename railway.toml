@@ -2,7 +2,7 @@
 builder = "NIXPACKS"
 
 [deploy]
-startCommand = "npx prisma db push --skip-generate && npx tsx prisma/seed.ts && npx next start -H 0.0.0.0 -p ${PORT:-3000}"
+startCommand = "npx prisma db push --skip-generate --accept-data-loss && npx tsx prisma/seed.ts && npx next start -H 0.0.0.0 -p ${PORT:-3000}"
 healthcheckPath = "/api/health"
 healthcheckTimeout = 300
 restartPolicyType = "ON_FAILURE"
