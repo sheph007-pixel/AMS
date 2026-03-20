@@ -5,10 +5,10 @@ import { getExclusionRules, isExcluded } from "@/lib/exclusions";
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 /**
- * Benefits Report — based on the SINGLE most recent XML upload only.
+ * Benefits Report — based on the most current data period (highest year+month).
  *
- * 1. Find the latest importedAt across all snapshots → that's the latest upload
- * 2. Pull ALL snapshots from that upload (same year+month batch)
+ * 1. Find the highest year+month across all snapshots → most current data period
+ * 2. Pull ALL snapshots from that data period
  * 3. For each snapshot: only active employees → their active enrollments
  * 4. Aggregate by carrier: enrolled count + sum of MonthlyPlanCost
  * 5. Hide any carrier row where enrolled = 0 or premium = 0
@@ -17,9 +17,9 @@ export async function GET() {
   try {
     const exclusionRules = await getExclusionRules();
 
-    // Step 1: Find the most recent upload batch
+    // Step 1: Find the most current data period (highest year, then highest month)
     const latestSnapshot = await prisma.clientSnapshot.findFirst({
-      orderBy: { importedAt: "desc" },
+      orderBy: [{ year: "desc" }, { month: "desc" }],
       select: { year: true, month: true, importedAt: true },
     });
 
@@ -27,7 +27,7 @@ export async function GET() {
       return NextResponse.json({ rows: [], totals: null, lastUpload: null });
     }
 
-    // Step 2: Get ALL snapshots from that same upload (same year + month)
+    // Step 2: Get ALL snapshots from that data period (same year + month)
     const snapshots = await prisma.clientSnapshot.findMany({
       where: {
         year: latestSnapshot.year,
@@ -176,7 +176,7 @@ export async function GET() {
       rows,
       totals,
       lastUpload: latestSnapshot.importedAt.toISOString(),
-      uploadPeriod: `${latestSnapshot.year}-${String(latestSnapshot.month).padStart(2, "0")}`,
+      dataPeriod: `${latestSnapshot.year}-${String(latestSnapshot.month).padStart(2, "0")}`,
     });
   } catch (error) {
     console.error("Benefits report error:", error);

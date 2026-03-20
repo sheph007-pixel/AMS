@@ -97,6 +97,7 @@ export default function BenefitsReportPage() {
   const [rows, setRows] = useState<CarrierRow[]>([]);
   const [totals, setTotals] = useState<Totals | null>(null);
   const [lastUpload, setLastUpload] = useState<string | null>(null);
+  const [dataPeriod, setDataPeriod] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [loading, setLoading] = useState(true);
   const [sortKey, setSortKey] = useState<SortKey>("carrier");
@@ -110,6 +111,7 @@ export default function BenefitsReportPage() {
         setRows(data.rows || []);
         setTotals(data.totals || null);
         setLastUpload(data.lastUpload || null);
+        setDataPeriod(data.dataPeriod || null);
       })
       .finally(() => setLoading(false));
   }, []);
@@ -204,15 +206,15 @@ ${tableHTML}
       </a>
       <h1 className="text-2xl font-bold mb-1">Benefits Report</h1>
       <p className="text-sm text-gray-500 mb-4">
-        Carrier-level summary of actively enrolled employees and premiums from the latest upload.
+        Carrier-level summary of actively enrolled employees and premiums from the most current data period.
       </p>
 
       {/* Verified banner */}
-      {uploadLabel && (
+      {dataPeriod && (
         <div className="flex items-center gap-2 bg-green-50 border border-green-200 rounded-lg px-4 py-2.5 mb-5">
           <CheckCircle className="w-5 h-5 text-green-600 flex-shrink-0" />
           <span className="text-sm text-green-800">
-            <span className="font-semibold">Verified</span> — Based on latest upload: {uploadLabel}. Showing active enrolled employees only. Exclusion rules applied.
+            <span className="font-semibold">Verified</span> — Data period: {dataPeriod}. Showing active enrolled employees only. Exclusion rules applied.
           </span>
         </div>
       )}
