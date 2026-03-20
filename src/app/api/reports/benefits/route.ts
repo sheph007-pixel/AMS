@@ -10,10 +10,20 @@ import { getExclusionRules, isExcluded } from "@/lib/exclusions";
  * Produces:
  *   1. Main carrier summary table
  *   2. Full reconciliation/debug data for auditing
+ *   3. Per-company plan-type enrollment data (for Groups page)
  *
  * All data comes from the latest data period (max year+month).
  * Re-computed from enrollment metadata on every request — never stale.
  */
+
+function classifyPlanType(planType: string | null): string {
+  const t = (planType || "").toLowerCase();
+  if (t.includes("medical") || t.includes("health")) return "Medical";
+  if (t.includes("dental")) return "Dental";
+  if (t.includes("vision")) return "Vision";
+  return "Supplemental";
+}
+
 export async function GET() {
   try {
     const exclusionRules = await getExclusionRules();
@@ -32,10 +42,23 @@ export async function GET() {
         reconciliation: null,
         lastUpload: null,
         dataPeriod: null,
+        companyPlanTypes: {},
       });
     }
 
     const { year: latestYear, month: latestMonth } = latestSnapshot;
+
+    // ── Find previous data period ────────────────────────────────────────
+    const prevSnapshot = await prisma.clientSnapshot.findFirst({
+      where: {
+        OR: [
+          { year: { lt: latestYear } },
+          { year: latestYear, month: { lt: latestMonth } },
+        ],
+      },
+      orderBy: [{ year: "desc" }, { month: "desc" }],
+      select: { year: true, month: true },
+    });
 
     // ── Step 2: Load all snapshots from the latest period ────────────────
 
@@ -47,6 +70,18 @@ export async function GET() {
         employees: true,
       },
     });
+
+    // Also load previous period snapshots for YoY
+    const prevSnapshots = prevSnapshot
+      ? await prisma.clientSnapshot.findMany({
+          where: { year: prevSnapshot.year, month: prevSnapshot.month },
+          include: {
+            client: true,
+            benefitPlans: true,
+            employees: true,
+          },
+        })
+      : [];
 
     let latestImportDate: Date | null = null;
 
@@ -74,6 +109,12 @@ export async function GET() {
     const companyCarrierData = new Map<
       string,
       { distinctEnrolled: Set<string>; enrollmentRows: number; premium: number }
+    >();
+
+    // Per-company plan-type enrollment: clientId → { Medical: Set, Dental: Set, ... }
+    const companyPlanTypeEnrolled = new Map<
+      string,
+      Record<string, Set<string>>
     >();
 
     // Exception counters
@@ -114,6 +155,20 @@ export async function GET() {
       return d;
     }
 
+    function getCompanyPlanTypes(clientId: string): Record<string, Set<string>> {
+      let entry = companyPlanTypeEnrolled.get(clientId);
+      if (!entry) {
+        entry = {
+          Medical: new Set(),
+          Dental: new Set(),
+          Vision: new Set(),
+          Supplemental: new Set(),
+        };
+        companyPlanTypeEnrolled.set(clientId, entry);
+      }
+      return entry;
+    }
+
     // ── Step 3: Process each snapshot ────────────────────────────────────
 
     for (const snapshot of snapshots) {
@@ -134,8 +189,11 @@ export async function GET() {
       }
 
       // Build plan lookup: PlanIdentifier → carrier, PlanName → carrier
+      // Also build planType lookup: PlanIdentifier → planType
       const planIdToCarrier = new Map<string, string>();
       const planNameToCarrier = new Map<string, string>();
+      const planIdToPlanType = new Map<string, string>();
+      const planNameToPlanType = new Map<string, string>();
 
       for (const bp of snapshot.benefitPlans) {
         if (
@@ -148,6 +206,7 @@ export async function GET() {
         }
 
         const carrier = bp.carrier || "Unspecified Carrier";
+        const category = classifyPlanType(bp.planType);
 
         if (bp.metadata) {
           try {
@@ -155,11 +214,15 @@ export async function GET() {
             const planId = meta.PlanIdentifier || meta.planIdentifier;
             if (planId) {
               planIdToCarrier.set(String(planId), carrier);
+              planIdToPlanType.set(String(planId), category);
               totalPlansInMap++;
             }
           } catch { /* ignore */ }
         }
-        if (bp.planName) planNameToCarrier.set(bp.planName, carrier);
+        if (bp.planName) {
+          planNameToCarrier.set(bp.planName, carrier);
+          planNameToPlanType.set(bp.planName, category);
+        }
 
         // Track carrier → company for eligibility
         if (!carrierCompanies.has(carrier)) carrierCompanies.set(carrier, new Set());
@@ -210,14 +273,17 @@ export async function GET() {
           );
 
           let carrier: string | undefined;
+          let planType: string | undefined;
 
           if (enrollPlanId) {
             carrier = planIdToCarrier.get(enrollPlanId);
+            planType = planIdToPlanType.get(enrollPlanId);
             if (!carrier) {
               exceptions.unmatchedPlanIdentifier++;
               // Fallback to plan name
               if (enrollPlanName) {
                 carrier = planNameToCarrier.get(enrollPlanName);
+                planType = planNameToPlanType.get(enrollPlanName);
                 if (carrier) exceptions.fallbackPlanNameMatch++;
               }
             }
@@ -225,6 +291,7 @@ export async function GET() {
             exceptions.missingPlanIdentifier++;
             if (enrollPlanName) {
               carrier = planNameToCarrier.get(enrollPlanName);
+              planType = planNameToPlanType.get(enrollPlanName);
               if (carrier) exceptions.fallbackPlanNameMatch++;
             }
           }
@@ -266,6 +333,12 @@ export async function GET() {
           ccd.enrollmentRows++;
           ccd.premium += cost;
           ccd.distinctEnrolled.add(empKey);
+
+          // ── Aggregate: company plan-type level ──
+          if (planType) {
+            const cpt = getCompanyPlanTypes(clientId);
+            cpt[planType].add(emp.employeeId);
+          }
         }
       }
     }
@@ -306,7 +379,6 @@ export async function GET() {
 
     // ── Step 6: Build reconciliation data ────────────────────────────────
 
-    // B: Carrier audit table (with enrollment row counts)
     const carrierAudit = Array.from(carrierMap.values())
       .filter((e) => e.eligibleEmployees.size > 0)
       .map((e) => ({
@@ -318,7 +390,6 @@ export async function GET() {
       }))
       .sort((a, b) => b.monthlyPremium - a.monthlyPremium);
 
-    // C: Company-level eligibility by carrier
     const companyEligibility: {
       carrier: string;
       companyId: string;
@@ -344,7 +415,6 @@ export async function GET() {
     }
     companyEligibility.sort((a, b) => a.carrier.localeCompare(b.carrier) || a.companyName.localeCompare(b.companyName));
 
-    // D: Company-level enrollment by carrier
     const companyEnrollment: {
       carrier: string;
       companyId: string;
@@ -368,7 +438,115 @@ export async function GET() {
     }
     companyEnrollment.sort((a, b) => b.premium - a.premium);
 
+    // ── Step 7: Build per-company plan-type data (for Groups page) ──────
+
+    const companyPlanTypes: Record<string, {
+      activeEmployees: number;
+      medical: number;
+      dental: number;
+      vision: number;
+      supplemental: number;
+      premium: number;
+    }> = {};
+
+    for (const [clientId, info] of companyInfo) {
+      const planTypes = companyPlanTypeEnrolled.get(clientId);
+
+      // Sum premium across all carriers for this company
+      let companyPremium = 0;
+      for (const [key, data] of companyCarrierData) {
+        if (key.endsWith(`::${clientId}`)) {
+          companyPremium += data.premium;
+        }
+      }
+
+      companyPlanTypes[clientId] = {
+        activeEmployees: info.activeEmployees.size,
+        medical: planTypes?.Medical?.size ?? 0,
+        dental: planTypes?.Dental?.size ?? 0,
+        vision: planTypes?.Vision?.size ?? 0,
+        supplemental: planTypes?.Supplemental?.size ?? 0,
+        premium: Math.round(companyPremium * 100) / 100,
+      };
+    }
+
+    // ── YoY: Process previous period ─────────────────────────────────────
+
+    let prevTotalActiveEmployees = 0;
+    let prevTotalCompanies = 0;
+    let prevTotalPremium = 0;
+
+    for (const snapshot of prevSnapshots) {
+      if (isExcluded({ groupName: snapshot.client.groupName }, exclusionRules)) {
+        continue;
+      }
+
+      prevTotalCompanies++;
+      const planIdToCarrier = new Map<string, string>();
+      const planNameToCarrier = new Map<string, string>();
+
+      for (const bp of snapshot.benefitPlans) {
+        if (isExcluded({ carrier: bp.carrier, planName: bp.planName, planType: bp.planType }, exclusionRules)) continue;
+        const carrier = bp.carrier || "Unspecified Carrier";
+        if (bp.metadata) {
+          try {
+            const meta = JSON.parse(bp.metadata);
+            const planId = meta.PlanIdentifier || meta.planIdentifier;
+            if (planId) planIdToCarrier.set(String(planId), carrier);
+          } catch { /* ignore */ }
+        }
+        if (bp.planName) planNameToCarrier.set(bp.planName, carrier);
+      }
+
+      if (planIdToCarrier.size === 0 && planNameToCarrier.size === 0) continue;
+
+      for (const emp of snapshot.employees) {
+        const status = (emp.status || "Active").toLowerCase();
+        if (status !== "active") continue;
+        prevTotalActiveEmployees++;
+
+        if (!emp.metadata) continue;
+        let meta: any;
+        try { meta = JSON.parse(emp.metadata); } catch { continue; }
+
+        const enrollments = findEnrollmentsFromMeta(meta);
+        for (const enrollment of enrollments) {
+          const enrollmentType = enrollment.EnrollmentType || enrollment.enrollmentType || enrollment.Type;
+          let isQualifying = false;
+          if (enrollmentType) {
+            isQualifying = String(enrollmentType).toLowerCase() === "current";
+          } else {
+            const declineReason = enrollment.DeclineReason || enrollment.declineReason;
+            const endDate = enrollment.CoverageEndDate || enrollment.EndDate || enrollment.EndedOn;
+            const isEnded = endDate && new Date(String(endDate)) <= new Date();
+            isQualifying = !declineReason && !isEnded;
+          }
+          if (!isQualifying) continue;
+
+          const enrollPlanId = String(enrollment.PlanIdentifier || enrollment.PlanId || enrollment.PlanID || "");
+          const enrollPlanName = String(enrollment.PlanName || enrollment.Plan || enrollment.Name || "");
+          let carrier: string | undefined;
+          if (enrollPlanId) {
+            carrier = planIdToCarrier.get(enrollPlanId);
+            if (!carrier && enrollPlanName) carrier = planNameToCarrier.get(enrollPlanName);
+          } else if (enrollPlanName) {
+            carrier = planNameToCarrier.get(enrollPlanName);
+          }
+          if (!carrier) continue;
+
+          const rawCost = String(enrollment.PlanCost || enrollment.MonthlyPlanCost || "");
+          if (rawCost) {
+            const parsed = parseFloat(rawCost);
+            if (!isNaN(parsed)) prevTotalPremium += parsed;
+          }
+        }
+      }
+    }
+
     const dataPeriod = `${latestYear}-${String(latestMonth).padStart(2, "0")}`;
+    const prevPeriod = prevSnapshot
+      ? `${prevSnapshot.year}-${String(prevSnapshot.month).padStart(2, "0")}`
+      : null;
 
     return NextResponse.json({
       rows,
@@ -383,6 +561,24 @@ export async function GET() {
         companyEligibility,
         companyEnrollment,
         exceptions,
+      },
+      // New fields for Groups page
+      companyPlanTypes,
+      yoy: {
+        currentYear: latestYear,
+        previousYear: prevSnapshot?.year ?? null,
+        currentPeriod: dataPeriod,
+        previousPeriod: prevPeriod,
+        current: {
+          activeGroups: totalCompanies,
+          activeEmployees: totalActiveEmployees,
+          premium: Math.round(totals.monthlyPremium * 100) / 100,
+        },
+        previous: {
+          activeGroups: prevTotalCompanies,
+          activeEmployees: prevTotalActiveEmployees,
+          premium: Math.round(prevTotalPremium * 100) / 100,
+        },
       },
     });
   } catch (error) {

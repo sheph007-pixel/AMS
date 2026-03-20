@@ -8,36 +8,52 @@ import {
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-interface ClientRow {
+interface ClientBase {
   id: string;
   groupId: string;
   groupName: string;
   state: string | null;
   status: string;
-  activeEmployees: number | null;
+}
+
+interface ClientRow extends ClientBase {
+  activeEmployees: number;
   medicalEnrolled: number;
   dentalEnrolled: number;
   visionEnrolled: number;
   supplementalEnrolled: number;
 }
 
-interface YoYMetric {
-  current: number;
-  previous: number;
-}
-
-interface Summary {
+interface YoYData {
   currentYear: number;
-  lastYear: number;
-  activeGroups: YoYMetric;
-  enrolled: YoYMetric;
-  premium: YoYMetric;
+  previousYear: number | null;
+  current: { activeGroups: number; activeEmployees: number; premium: number };
+  previous: { activeGroups: number; activeEmployees: number; premium: number };
 }
 
 type SortKey = "groupName" | "state" | "activeEmployees";
 type SortDir = "asc" | "desc";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+
+function toTitleCase(str: string): string {
+  const uppercaseWords = new Set(["LLC", "INC", "CO", "LP", "LLP", "PC", "PA", "DBA", "USA", "US"]);
+  const lowercaseWords = new Set(["of", "the", "and", "in", "for", "on", "at", "to", "a", "an"]);
+
+  return str
+    .split(/\s+/)
+    .map((word, index) => {
+      const clean = word.replace(/[.,]+$/, "");
+      const punctuation = word.slice(clean.length);
+      if (uppercaseWords.has(clean.toUpperCase())) return clean.toUpperCase() + punctuation;
+      if (index > 0 && lowercaseWords.has(clean.toLowerCase())) return clean.toLowerCase() + punctuation;
+      if (clean === clean.toUpperCase() && clean.length > 1) {
+        return clean.charAt(0).toUpperCase() + clean.slice(1).toLowerCase() + punctuation;
+      }
+      return clean.charAt(0).toUpperCase() + clean.slice(1) + punctuation;
+    })
+    .join(" ");
+}
 
 function pctChange(current: number, previous: number): number | null {
   if (previous === 0) return current > 0 ? 100 : null;
@@ -56,40 +72,6 @@ function formatCurrency(value: number): string {
   return `$${value.toLocaleString()}`;
 }
 
-/**
- * Convert a string to Title Case, preserving common abbreviations and suffixes.
- */
-function toTitleCase(str: string): string {
-  // Words that should stay uppercase
-  const uppercaseWords = new Set(["LLC", "INC", "CO", "LP", "LLP", "PC", "PA", "DBA", "USA", "US"]);
-  // Words that should stay lowercase (unless first word)
-  const lowercaseWords = new Set(["of", "the", "and", "in", "for", "on", "at", "to", "a", "an"]);
-
-  return str
-    .split(/\s+/)
-    .map((word, index) => {
-      // Check if the word (without trailing punctuation) is an uppercase abbreviation
-      const clean = word.replace(/[.,]+$/, "");
-      const punctuation = word.slice(clean.length);
-
-      if (uppercaseWords.has(clean.toUpperCase())) {
-        return clean.toUpperCase() + punctuation;
-      }
-      if (index > 0 && lowercaseWords.has(clean.toLowerCase())) {
-        return clean.toLowerCase() + punctuation;
-      }
-      // Title-case: uppercase first letter, lowercase rest
-      // But preserve internal capitals for names like "McDonald's"
-      if (clean === clean.toUpperCase() && clean.length > 1) {
-        // ALL CAPS word → convert to Title Case
-        return clean.charAt(0).toUpperCase() + clean.slice(1).toLowerCase() + punctuation;
-      }
-      // Already mixed case — just ensure first letter is uppercase
-      return clean.charAt(0).toUpperCase() + clean.slice(1) + punctuation;
-    })
-    .join(" ");
-}
-
 function downloadFile(content: string, filename: string, mimeType: string) {
   const blob = new Blob([content], { type: mimeType });
   const url = URL.createObjectURL(blob);
@@ -106,7 +88,7 @@ function toCSV(rows: ClientRow[]): string {
     [
       `"${toTitleCase(r.groupName)}"`,
       r.state || "",
-      r.activeEmployees ?? "",
+      r.activeEmployees,
       r.medicalEnrolled,
       r.dentalEnrolled,
       r.visionEnrolled,
@@ -119,8 +101,8 @@ function toCSV(rows: ClientRow[]): string {
 // ─── Main Page ────────────────────────────────────────────────────────────────
 
 export default function GroupsPage() {
-  const [clients, setClients] = useState<ClientRow[]>([]);
-  const [summary, setSummary] = useState<Summary | null>(null);
+  const [rows, setRows] = useState<ClientRow[]>([]);
+  const [yoy, setYoy] = useState<YoYData | null>(null);
   const [search, setSearch] = useState("");
   const [loading, setLoading] = useState(true);
   const [sortKey, setSortKey] = useState<SortKey>("groupName");
@@ -128,21 +110,50 @@ export default function GroupsPage() {
   const tableRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    fetch("/api/clients")
-      .then((res) => res.json())
-      .then((data) => {
-        setClients(data.clients || []);
-        setSummary(data.summary || null);
+    // Fetch both APIs in parallel — clients for group list, benefits for enrollment data
+    Promise.all([
+      fetch("/api/clients").then((r) => r.json()),
+      fetch("/api/reports/benefits").then((r) => r.json()),
+    ])
+      .then(([clientsData, benefitsData]) => {
+        const clients: ClientBase[] = clientsData.clients || [];
+        const companyPlanTypes: Record<string, {
+          activeEmployees: number;
+          medical: number;
+          dental: number;
+          vision: number;
+          supplemental: number;
+        }> = benefitsData.companyPlanTypes || {};
+
+        // Only active groups (present in current year)
+        const activeClients = clients.filter(
+          (c) => c.status === "Active" || c.status === "New" || c.status === "Returned"
+        );
+
+        // Merge: group list + benefits enrollment data
+        const merged: ClientRow[] = activeClients.map((client) => {
+          const planData = companyPlanTypes[client.id];
+          return {
+            ...client,
+            activeEmployees: planData?.activeEmployees ?? 0,
+            medicalEnrolled: planData?.medical ?? 0,
+            dentalEnrolled: planData?.dental ?? 0,
+            visionEnrolled: planData?.vision ?? 0,
+            supplementalEnrolled: planData?.supplemental ?? 0,
+          };
+        });
+
+        setRows(merged);
+
+        // YoY data comes directly from the benefits report
+        if (benefitsData.yoy) {
+          setYoy(benefitsData.yoy);
+        }
       })
       .finally(() => setLoading(false));
   }, []);
 
-  // Only show active groups (present in current year)
-  const activeClients = clients.filter(
-    (c) => c.status === "Active" || c.status === "New" || c.status === "Returned"
-  );
-
-  const filtered = activeClients.filter((c) => {
+  const filtered = rows.filter((c) => {
     if (!search) return true;
     const q = search.toLowerCase();
     return (
@@ -186,45 +197,41 @@ export default function GroupsPage() {
     downloadFile(toCSV(sorted), "groups.csv", "text/csv");
   }
 
-  // Derive Active Groups and # Enrolled directly from the displayed list
-  const activeGroupCount = activeClients.length;
-  const enrolledTotal = activeClients.reduce(
-    (sum, c) => sum + (c.activeEmployees ?? 0),
-    0
-  );
-
-  // Summary card data
-  const cards = summary
+  // Summary cards use YoY data from benefits report (guaranteed match)
+  const cards = yoy
     ? [
         {
           label: "Active Groups",
           icon: <Building2 className="w-5 h-5 text-bob-purple" />,
           iconBg: "bg-bob-purple-light",
-          current: activeGroupCount,
-          previous: summary.activeGroups.previous,
+          current: yoy.current.activeGroups,
+          previous: yoy.previous.activeGroups,
           format: (v: number) => v.toLocaleString(),
-          pct: pctChange(activeGroupCount, summary.activeGroups.previous),
+          pct: pctChange(yoy.current.activeGroups, yoy.previous.activeGroups),
         },
         {
           label: "# Enrolled",
           icon: <Users className="w-5 h-5 text-bob-green" />,
           iconBg: "bg-bob-green-light",
-          current: enrolledTotal,
-          previous: summary.enrolled.previous,
+          current: yoy.current.activeEmployees,
+          previous: yoy.previous.activeEmployees,
           format: (v: number) => v.toLocaleString(),
-          pct: pctChange(enrolledTotal, summary.enrolled.previous),
+          pct: pctChange(yoy.current.activeEmployees, yoy.previous.activeEmployees),
         },
         {
           label: "Premium",
           icon: <DollarSign className="w-5 h-5 text-bob-blue" />,
           iconBg: "bg-bob-blue-light",
-          current: summary.premium.current,
-          previous: summary.premium.previous,
+          current: yoy.current.premium,
+          previous: yoy.previous.premium,
           format: formatCurrency,
-          pct: pctChange(summary.premium.current, summary.premium.previous),
+          pct: pctChange(yoy.current.premium, yoy.previous.premium),
         },
       ]
     : [];
+
+  const currentYear = yoy?.currentYear;
+  const previousYear = yoy?.previousYear;
 
   return (
     <div>
@@ -235,7 +242,7 @@ export default function GroupsPage() {
       </div>
 
       {/* Stat cards — YoY comparison */}
-      {summary && (
+      {yoy && (
         <div className="grid grid-cols-3 gap-4 mb-8 stagger-children">
           {cards.map((card) => (
             <div
@@ -251,11 +258,13 @@ export default function GroupsPage() {
               <p className="text-3xl font-bold text-bob-text">{card.format(card.current)}</p>
               <div className="flex items-center gap-3 mt-2">
                 <span className="text-xs text-bob-text-soft">
-                  {summary.currentYear}: <span className="font-semibold text-bob-text">{card.format(card.current)}</span>
+                  {currentYear}: <span className="font-semibold text-bob-text">{card.format(card.current)}</span>
                 </span>
-                <span className="text-xs text-bob-text-soft">
-                  {summary.lastYear}: <span className="font-semibold text-bob-text">{card.format(card.previous)}</span>
-                </span>
+                {previousYear && (
+                  <span className="text-xs text-bob-text-soft">
+                    {previousYear}: <span className="font-semibold text-bob-text">{card.format(card.previous)}</span>
+                  </span>
+                )}
                 <span
                   className={`text-xs font-semibold px-1.5 py-0.5 rounded ${
                     card.pct !== null && card.pct >= 0
@@ -297,19 +306,22 @@ export default function GroupsPage() {
           <div className="w-8 h-8 border-2 border-bob-purple border-t-transparent rounded-full animate-spin mx-auto mb-3" />
           Loading groups...
         </div>
-      ) : filtered.length === 0 ? (
+      ) : rows.length === 0 ? (
         <div className="text-center py-16 animate-fade-in">
           <div className="w-16 h-16 bg-bob-purple-light rounded-2xl flex items-center justify-center mx-auto mb-4">
             <Building2 className="w-8 h-8 text-bob-purple" />
           </div>
           <p className="text-bob-text font-semibold mb-1">
-            {activeClients.length === 0 ? "No active groups" : "No matches found"}
+            No active groups
           </p>
           <p className="text-bob-text-soft text-sm">
-            {activeClients.length === 0
-              ? "Upload an XML file to get started"
-              : "Try adjusting your search"}
+            Upload an XML file to get started
           </p>
+        </div>
+      ) : filtered.length === 0 ? (
+        <div className="text-center py-16 animate-fade-in">
+          <p className="text-bob-text font-semibold mb-1">No matches found</p>
+          <p className="text-bob-text-soft text-sm">Try adjusting your search</p>
         </div>
       ) : (
         <>
@@ -355,7 +367,7 @@ export default function GroupsPage() {
                       </td>
                       <td className="px-4 py-3 text-bob-text-soft">{row.state || "—"}</td>
                       <td className="px-4 py-3 text-right font-medium tabular-nums">
-                        {row.activeEmployees != null ? row.activeEmployees.toLocaleString() : "—"}
+                        {row.activeEmployees > 0 ? row.activeEmployees.toLocaleString() : "—"}
                       </td>
                       <td className="px-4 py-3 text-right tabular-nums text-bob-text-soft">
                         {row.medicalEnrolled > 0 ? row.medicalEnrolled.toLocaleString() : "—"}
@@ -376,7 +388,7 @@ export default function GroupsPage() {
             </div>
           </div>
           <div className="mt-3 text-xs text-bob-text-soft">
-            Showing {sorted.length.toLocaleString()} of {activeClients.length.toLocaleString()} active groups
+            Showing {sorted.length.toLocaleString()} of {rows.length.toLocaleString()} active groups
           </div>
         </>
       )}
