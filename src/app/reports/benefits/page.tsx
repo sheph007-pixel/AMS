@@ -88,7 +88,7 @@ function toCSV(rows: CarrierRow[], totals: Totals): string {
   const lines = rows.map(
     (r) => `"${r.carrier}",${r.groups},${r.eligible},${r.enrolled},${r.monthlyPremium.toFixed(2)}`
   );
-  lines.push(`"-- Total --",${totals.groups},${totals.eligible},${totals.enrolled},${totals.monthlyPremium.toFixed(2)}`);
+  lines.push(`"-- Total --","",${totals.eligible},${totals.enrolled},${totals.monthlyPremium.toFixed(2)}`);
   return [header, ...lines].join("\n");
 }
 
@@ -130,7 +130,7 @@ function toExcelXML(rows: CarrierRow[], totals: Totals): string {
   }
   xml += "<Row>";
   xml += `<Cell ss:StyleID="Bold"><Data ss:Type="String">-- Total --</Data></Cell>`;
-  xml += `<Cell ss:StyleID="Bold"><Data ss:Type="Number">${totals.groups}</Data></Cell>`;
+  xml += `<Cell><Data ss:Type="String"></Data></Cell>`;  // groups intentionally blank
   xml += `<Cell ss:StyleID="Bold"><Data ss:Type="Number">${totals.eligible}</Data></Cell>`;
   xml += `<Cell ss:StyleID="Bold"><Data ss:Type="Number">${totals.enrolled}</Data></Cell>`;
   xml += `<Cell ss:StyleID="BoldCurrency"><Data ss:Type="Number">${totals.monthlyPremium}</Data></Cell>`;
@@ -580,10 +580,10 @@ ${tableHTML}
                     <ClickableCell value={row.monthlyPremium} carrier={row.carrier} type="premium" onClick={openDetail} isCurrency className="text-right font-semibold" />
                   </tr>
                 ))}
-                {/* Totals row — also clickable */}
+                {/* Totals row — groups intentionally blank (groups overlap across carriers) */}
                 <tr className="bg-bob-bg font-bold">
                   <td className="px-6 py-4 text-bob-text">Total</td>
-                  <ClickableCell value={displayTotals.groups} carrier="__all__" type="groups" onClick={openDetail} className="text-right" />
+                  <td className="px-6 py-4 text-right text-gray-400">—</td>
                   <ClickableCell value={displayTotals.eligible} carrier="__all__" type="eligible" onClick={openDetail} className="text-right" />
                   <ClickableCell value={displayTotals.enrolled} carrier="__all__" type="enrolled" onClick={openDetail} className="text-right" />
                   <ClickableCell value={displayTotals.monthlyPremium} carrier="__all__" type="premium" onClick={openDetail} isCurrency className="text-right" />
