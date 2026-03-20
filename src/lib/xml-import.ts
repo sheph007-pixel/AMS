@@ -1,12 +1,20 @@
 import { XMLParser } from "fast-xml-parser";
 import { prisma } from "./db";
 
+// Employee Navigator Broker Data Exchange XML parser
 const parser = new XMLParser({
   ignoreAttributes: false,
   attributeNamePrefix: "@_",
   isArray: (name) => {
-    // Ensure these are always arrays even with single elements
-    return ["Group", "Employee", "Plan", "Member", "Benefit", "Coverage"].includes(name);
+    // These elements can appear multiple times; force them to always be arrays
+    return [
+      "Company", "Plan", "Employee", "Dependent", "Enrollment", "Enrollee",
+      "Address", "Phone", "Contact", "Class", "Department", "Division",
+      "Office", "BusinessUnit", "PayrollGroup", "Beneficiary", "Election",
+      "EmailAddress", "Salary", "FutureSalaries",
+      // Also support generic names for non-EN formats
+      "Group", "Member", "Benefit", "Coverage",
+    ].includes(name);
   },
 });
 
@@ -21,12 +29,23 @@ interface ImportResult {
   rawPreview?: string;
 }
 
+/* eslint-disable @typescript-eslint/no-explicit-any */
+
 /**
- * Import an annual XML snapshot. Each XML represents one complete year.
- * - Deduplicates clients by groupId
- * - Creates or updates ClientSnapshot for the year
- * - For 2026, replaces the existing snapshot if re-uploaded
- * - For 2022–2025, treats as fixed historical snapshots
+ * Import an annual XML snapshot from Employee Navigator's Broker Data Exchange format.
+ *
+ * Expected XML hierarchy:
+ *   <Data>
+ *     <Header>...</Header>
+ *     <Companies>
+ *       <Company>
+ *         <CompanyIdentifier>...</CompanyIdentifier>
+ *         <EntityName>...</EntityName>
+ *         <Plans><Plan>...</Plan></Plans>
+ *         <Employees><Employee>...</Employee></Employees>
+ *       </Company>
+ *     </Companies>
+ *   </Data>
  */
 export async function importAnnualXml(
   xmlContent: string,
@@ -34,10 +53,7 @@ export async function importAnnualXml(
 ): Promise<ImportResult> {
   const parsed = parser.parse(xmlContent);
 
-  // Try to find the groups array - support multiple XML structures
-  const groups = findGroups(parsed);
-
-  // Debug: capture the XML structure so we can see what tags are used
+  const companies = findCompanies(parsed);
   const debugStructure = describeStructure(parsed, 4);
   const rawPreview = xmlContent.substring(0, 2000);
 
@@ -52,27 +68,43 @@ export async function importAnnualXml(
     rawPreview,
   };
 
-  for (const group of groups) {
+  for (const company of companies) {
+    // --- Extract company/group identity ---
     const groupId = String(
-      group["@_GroupID"] || group["@_groupId"] || group["@_id"] ||
-      group.GroupID || group.groupId || group.GroupId || group.ID || group.Id ||
+      company.CompanyIdentifier || company.Identifier ||
+      company["@_CompanyIdentifier"] || company["@_Identifier"] ||
+      // Fallback to generic names
+      company.GroupID || company.groupId || company.GroupId ||
+      company["@_GroupID"] || company["@_groupId"] ||
       `unknown-${result.clientsProcessed}`
     );
+
     const groupName = String(
-      group["@_GroupName"] || group["@_groupName"] || group["@_name"] ||
-      group.GroupName || group.groupName || group.Name || group.name || groupId
+      company.EntityName || company.Name ||
+      company["@_EntityName"] || company["@_Name"] ||
+      // Fallback to generic names
+      company.GroupName || company.groupName || groupId
     );
 
-    // Upsert the canonical Client record
+    const ein = extractField(company, "FederalTaxId", "TaxID", "EIN");
+    const sicCode = extractField(company, "SICCode", "SIC");
+    const situsState = extractField(company, "SitusState", "State", "StateAbbreviation");
+
+    // --- Upsert canonical Client record ---
     let client = await prisma.client.findUnique({ where: { groupId } });
     if (!client) {
       client = await prisma.client.create({
         data: {
           groupId,
           groupName,
-          sicCode: extractField(group, "SICCode", "sicCode", "SIC"),
-          state: extractField(group, "State", "state"),
-          metadata: JSON.stringify(group),
+          sicCode,
+          state: situsState,
+          metadata: JSON.stringify({
+            ein,
+            corporationType: extractField(company, "CorporationType"),
+            address: extractAddress(company),
+            phone: extractPhone(company),
+          }),
         },
       });
       result.clientsCreated++;
@@ -81,85 +113,148 @@ export async function importAnnualXml(
         where: { id: client.id },
         data: {
           groupName,
-          sicCode: extractField(group, "SICCode", "sicCode", "SIC") || client.sicCode,
-          state: extractField(group, "State", "state") || client.state,
+          sicCode: sicCode || client.sicCode,
+          state: situsState || client.state,
           updatedAt: new Date(),
         },
       });
       result.clientsUpdated++;
     }
 
-    // For 2026 (active year), allow replacement. For historical years, skip if exists.
+    // --- Handle snapshot (historical vs current year) ---
     const existingSnapshot = await prisma.clientSnapshot.findUnique({
       where: { clientId_year: { clientId: client.id, year } },
     });
 
     if (existingSnapshot && year < 2026) {
       result.clientsProcessed++;
-      continue; // Historical snapshot already exists, skip
+      continue; // Historical snapshot already exists
     }
 
     if (existingSnapshot && year >= 2026) {
-      // Delete existing snapshot (cascade deletes plans + employees)
       await prisma.clientSnapshot.delete({ where: { id: existingSnapshot.id } });
     }
 
-    // Create the snapshot
+    // --- Count employees for snapshot totals ---
+    const employees = findEmployees(company);
+    const totalEmployees = employees.length;
+    const totalMembers = countTotalMembers(employees);
+
+    // --- Extract effective/renewal dates from plans ---
+    const plans = findPlans(company);
+    const { effectiveDate, renewalDate } = extractPlanDates(plans);
+
     const snapshot = await prisma.clientSnapshot.create({
       data: {
         clientId: client.id,
         year,
         groupName,
-        totalEmployees: parseIntSafe(extractField(group, "TotalEmployees", "totalEmployees", "EmployeeCount")),
-        totalMembers: parseIntSafe(extractField(group, "TotalMembers", "totalMembers", "MemberCount")),
-        effectiveDate: extractField(group, "EffectiveDate", "effectiveDate"),
-        renewalDate: extractField(group, "RenewalDate", "renewalDate"),
-        sicCode: extractField(group, "SICCode", "sicCode", "SIC"),
-        state: extractField(group, "State", "state"),
-        metadata: JSON.stringify(group),
+        totalEmployees: totalEmployees || null,
+        totalMembers: totalMembers || null,
+        effectiveDate,
+        renewalDate,
+        sicCode,
+        state: situsState,
+        metadata: JSON.stringify({
+          ein,
+          address: extractAddress(company),
+          departments: extractNames(company, "Departments", "Department"),
+          divisions: extractNames(company, "Divisions", "Division"),
+          classes: extractNames(company, "Classes", "Class"),
+        }),
       },
     });
 
-    // Import benefit plans
-    const plans = findPlans(group);
+    // --- Import benefit plans ---
     for (const plan of plans) {
+      const planType = derivePlanType(plan);
+      const carrier = extractField(plan, "Carrier");
+      const planName = extractField(plan, "PlanName", "Name");
+      const policyNumber = extractField(plan, "PolicyNumber");
+      const groupNumber = extractField(plan, "GroupNumber");
+      const monthlyCost = parseFloatSafe(extractField(plan, "MonthlyPlanCost"));
+
       await prisma.benefitPlan.create({
         data: {
           clientSnapshotId: snapshot.id,
-          planType: String(
-            plan.PlanType || plan.planType || plan.Type || plan.type ||
-            plan["@_PlanType"] || plan["@_type"] || "Unknown"
-          ),
-          carrier: extractField(plan, "Carrier", "carrier", "CarrierName"),
-          planName: extractField(plan, "PlanName", "planName", "Name", "name"),
-          enrollees: parseIntSafe(extractField(plan, "Enrollees", "enrollees", "EnrolledCount")),
-          premium: parseFloatSafe(extractField(plan, "Premium", "premium", "TotalPremium")),
-          metadata: JSON.stringify(plan),
+          planType,
+          carrier,
+          planName,
+          enrollees: null, // Will be derived from employee enrollments
+          premium: monthlyCost,
+          metadata: JSON.stringify({
+            policyNumber,
+            groupNumber,
+            planIdentifier: extractField(plan, "PlanIdentifier"),
+            carrierPlanCode: extractField(plan, "CarrierPlanCode"),
+            carrierPlanTypeCode: extractField(plan, "CarrierPlanTypeCode"),
+            carrierBenefitCode: extractField(plan, "CarrierBenefitCode"),
+            planStarts: extractField(plan, "PlanStarts"),
+            planEnds: extractField(plan, "PlanEnds"),
+            coverageLevel: extractField(plan, "CoverageLevel"),
+            isSelfFunded: extractField(plan, "IsSelfFunded"),
+            isPostTax: extractField(plan, "IsPostTax"),
+          }),
         },
       });
       result.benefitPlansCreated++;
     }
 
-    // Import employees
-    const employees = findEmployees(group);
+    // --- Import employees ---
     for (const emp of employees) {
       const employeeId = String(
-        emp["@_EmployeeID"] || emp["@_employeeId"] || emp["@_id"] ||
-        emp.EmployeeID || emp.employeeId || emp.EmployeeId || emp.ID ||
+        emp.EmployeeGUID || emp.EmployeeNumber || emp.ExternalEmployeeId ||
+        emp["@_EmployeeGUID"] || emp["@_EmployeeNumber"] ||
         `emp-${result.employeesProcessed}`
       );
+
+      // Person data is nested under <Person> element
+      const person: any = emp.Person || emp;
+      const firstName = String(person.FirstName || person.firstName || "");
+      const lastName = String(person.LastName || person.lastName || "");
+      const dob = extractField(person, "DOB", "DateOfBirth", "dateOfBirth");
+      const gender = extractField(person, "Gender", "gender");
+      const ssn = extractField(person, "SSN", "ssn");
+
+      const hireDate = extractField(emp, "HireDate", "HiredOn", "OriginalHireDate");
+      const termDate = extractField(emp, "TerminationDate", "TerminatedOn", "TermDate");
+      const status = extractField(emp, "EmploymentStatus", "Status") || deriveStatus(termDate);
+
+      // Derive coverage tier from enrollments
+      const enrollments = findEnrollments(emp);
+      const coverageTier = deriveCoverageTier(enrollments);
+
       await prisma.employeeSnapshot.create({
         data: {
           clientSnapshotId: snapshot.id,
           employeeId,
-          firstName: String(emp.FirstName || emp.firstName || emp.first || ""),
-          lastName: String(emp.LastName || emp.lastName || emp.last || ""),
-          dateOfBirth: extractField(emp, "DateOfBirth", "dateOfBirth", "DOB", "dob"),
-          hireDate: extractField(emp, "HireDate", "hireDate"),
-          termDate: extractField(emp, "TermDate", "termDate", "TerminationDate"),
-          status: extractField(emp, "Status", "status"),
-          coverageTier: extractField(emp, "CoverageTier", "coverageTier", "Tier", "tier"),
-          metadata: JSON.stringify(emp),
+          firstName,
+          lastName,
+          dateOfBirth: dob,
+          hireDate,
+          termDate: termDate,
+          status,
+          coverageTier,
+          metadata: JSON.stringify({
+            middleName: extractField(person, "MiddleName"),
+            suffix: extractField(person, "Suffix"),
+            gender,
+            ssn: ssn ? `***-**-${ssn.slice(-4)}` : null, // Mask SSN
+            maritalStatus: extractField(person, "MaritalStatus"),
+            tobaccoUser: extractField(person, "TobaccoUser"),
+            employmentType: extractField(emp, "EmploymentType"),
+            weeklyHours: extractField(emp, "WeeklyHours"),
+            jobTitle: extractField(emp, "JobTitle"),
+            salary: extractField(emp, "Salary", "AnnualBenefitSalary"),
+            payFrequency: extractField(emp, "PayFrequency"),
+            department: extractField(emp, "Department"),
+            division: extractField(emp, "Division"),
+            office: extractField(emp, "Office"),
+            class: extractField(emp, "Class"),
+            email: extractField(emp, "WorkEmailAddress", "PersonalEmailAddress"),
+            dependentCount: findDependents(emp).length || 0,
+            enrollmentCount: enrollments.length,
+          }),
         },
       });
       result.employeesProcessed++;
@@ -171,65 +266,193 @@ export async function importAnnualXml(
   return result;
 }
 
-// --- Helper functions to navigate varied XML structures ---
+// ===== Navigation helpers for Employee Navigator XML structure =====
 
-function findGroups(parsed: Record<string, unknown>): Record<string, unknown>[] {
-  // Try common root structures
+function findCompanies(parsed: any): any[] {
+  // Employee Navigator: Data > Companies > Company
+  const data = parsed.Data || parsed.data || parsed;
+  const companiesContainer = data.Companies || data.companies || data;
+  const companies = companiesContainer.Company || companiesContainer.company;
+
+  if (Array.isArray(companies)) return companies;
+  if (companies && typeof companies === "object") return [companies];
+
+  // Fallback: try generic Group-based structure
   const root = parsed.Root || parsed.root || parsed.Data || parsed.data ||
-    parsed.Groups || parsed.groups || parsed.Census || parsed.census || parsed;
-
+    parsed.Groups || parsed.groups || parsed;
   if (Array.isArray(root)) return root;
-
-  const inner = (root as Record<string, unknown>);
+  const inner = root as any;
   const groups = inner.Group || inner.group || inner.Groups || inner.groups ||
-    inner.Client || inner.client || inner.Clients || inner.clients;
-
+    inner.Client || inner.client || inner.Clients || inner.clients ||
+    inner.Company || inner.company;
   if (Array.isArray(groups)) return groups;
-  if (groups && typeof groups === "object") return [groups as Record<string, unknown>];
+  if (groups && typeof groups === "object") return [groups];
 
   return [];
 }
 
-function findPlans(group: Record<string, unknown>): Record<string, unknown>[] {
-  const container = group.Plans || group.plans || group.Benefits || group.benefits ||
-    group.Coverages || group.coverages || group;
+function findPlans(company: any): any[] {
+  const container = company.Plans || company.plans;
+  if (!container) return [];
   if (Array.isArray(container)) return container;
-
-  const inner = container as Record<string, unknown>;
-  const plans = inner.Plan || inner.plan || inner.Benefit || inner.benefit ||
-    inner.Coverage || inner.coverage;
-
+  const plans = container.Plan || container.plan;
   if (Array.isArray(plans)) return plans;
-  if (plans && typeof plans === "object") return [plans as Record<string, unknown>];
+  if (plans && typeof plans === "object") return [plans];
   return [];
 }
 
-function findEmployees(group: Record<string, unknown>): Record<string, unknown>[] {
-  const container = group.Employees || group.employees || group.Members || group.members ||
-    group.Census || group.census;
+function findEmployees(company: any): any[] {
+  const container = company.Employees || company.employees;
+  if (!container) return [];
   if (Array.isArray(container)) return container;
-
-  const inner = container as Record<string, unknown>;
-  const employees = inner.Employee || inner.employee || inner.Member || inner.member;
-
+  const employees = container.Employee || container.employee;
   if (Array.isArray(employees)) return employees;
-  if (employees && typeof employees === "object") return [employees as Record<string, unknown>];
+  if (employees && typeof employees === "object") return [employees];
   return [];
 }
 
-function extractField(obj: Record<string, unknown>, ...keys: string[]): string | null {
+function findDependents(employee: any): any[] {
+  const container = employee.Dependents || employee.dependents;
+  if (!container) return [];
+  if (Array.isArray(container)) return container;
+  const deps = container.Dependent || container.dependent;
+  if (Array.isArray(deps)) return deps;
+  if (deps && typeof deps === "object") return [deps];
+  return [];
+}
+
+function findEnrollments(employee: any): any[] {
+  const container = employee.Enrollments || employee.enrollments;
+  if (!container) return [];
+  if (Array.isArray(container)) return container;
+  const enrollments = container.Enrollment || container.enrollment;
+  if (Array.isArray(enrollments)) return enrollments;
+  if (enrollments && typeof enrollments === "object") return [enrollments];
+  return [];
+}
+
+// ===== Field extraction helpers =====
+
+function extractField(obj: any, ...keys: string[]): string | null {
+  if (!obj || typeof obj !== "object") return null;
   for (const key of keys) {
-    if (obj[key] !== undefined && obj[key] !== null) return String(obj[key]);
+    if (obj[key] !== undefined && obj[key] !== null && obj[key] !== "") return String(obj[key]);
     if (obj[`@_${key}`] !== undefined && obj[`@_${key}`] !== null) return String(obj[`@_${key}`]);
   }
   return null;
 }
 
-function parseIntSafe(val: string | null): number | null {
-  if (!val) return null;
-  const n = parseInt(val, 10);
-  return isNaN(n) ? null : n;
+function extractAddress(company: any): any {
+  const addresses = company.Addresses || company.addresses;
+  if (!addresses) return null;
+  const addrList = addresses.Address || addresses.address;
+  const addr = Array.isArray(addrList) ? addrList[0] : addrList;
+  if (!addr) return null;
+  return {
+    address1: extractField(addr, "Address1", "Address"),
+    address2: extractField(addr, "Address2"),
+    city: extractField(addr, "City"),
+    state: extractField(addr, "State", "StateAbbreviation"),
+    zip: extractField(addr, "ZIP", "Zip"),
+    county: extractField(addr, "County"),
+    country: extractField(addr, "Country"),
+  };
 }
+
+function extractPhone(company: any): string | null {
+  const contacts = company.Contacts || company.contacts;
+  if (!contacts) return null;
+  const contactList = contacts.Contact || contacts.contact;
+  const contact = Array.isArray(contactList) ? contactList[0] : contactList;
+  if (!contact) return null;
+  const phones = contact.Phones || contact.phones;
+  if (!phones) return null;
+  const phoneList = phones.Phone || phones.phone;
+  const phone = Array.isArray(phoneList) ? phoneList[0] : phoneList;
+  if (!phone) return null;
+  return extractField(phone, "VoiceNumber", "Number", "PhoneNumber");
+}
+
+function extractNames(company: any, containerKey: string, itemKey: string): string[] {
+  const container = company[containerKey];
+  if (!container) return [];
+  const items = container[itemKey];
+  if (!items) return [];
+  const list = Array.isArray(items) ? items : [items];
+  return list.map((item: any) =>
+    typeof item === "string" ? item : (item.Name || item.name || item.Description || "")
+  ).filter(Boolean);
+}
+
+// ===== Derived fields =====
+
+function derivePlanType(plan: any): string {
+  // Try explicit plan type code first
+  const typeCode = extractField(plan, "CarrierPlanTypeCode", "PlanType", "Type");
+  if (typeCode) {
+    const code = typeCode.toUpperCase();
+    if (code.startsWith("MED")) return "Medical";
+    if (code.startsWith("DEN")) return "Dental";
+    if (code.startsWith("VIS")) return "Vision";
+    if (code.startsWith("LIF") || code === "LIFE") return "Life";
+    if (code === "ADD" || code.startsWith("AD&D") || code.startsWith("ADD")) return "AD&D";
+    if (code.startsWith("STD") || code.includes("SHORT")) return "Short-Term Disability";
+    if (code.startsWith("LTD") || code.includes("LONG")) return "Long-Term Disability";
+    if (code.includes("HSA")) return "HSA";
+    if (code.includes("FSA")) return "FSA";
+    if (code.includes("HRA")) return "HRA";
+    if (code.includes("EAP")) return "EAP";
+    if (code.includes("COBRA")) return "COBRA";
+    if (code.includes("VOL")) return `Voluntary ${typeCode}`;
+    return typeCode; // Use as-is if no mapping
+  }
+
+  // Try to infer from plan name
+  const planName = (extractField(plan, "PlanName", "Name") || "").toLowerCase();
+  if (planName.includes("medical") || planName.includes("health")) return "Medical";
+  if (planName.includes("dental")) return "Dental";
+  if (planName.includes("vision")) return "Vision";
+  if (planName.includes("life")) return "Life";
+  if (planName.includes("disability")) return "Disability";
+
+  return "Unknown";
+}
+
+function deriveStatus(termDate: string | null): string {
+  if (!termDate) return "Active";
+  const term = new Date(termDate);
+  return term <= new Date() ? "Terminated" : "Active";
+}
+
+function deriveCoverageTier(enrollments: any[]): string | null {
+  if (enrollments.length === 0) return null;
+  // Look for coverage level on the first enrollment (usually medical)
+  for (const enrollment of enrollments) {
+    const level = extractField(enrollment, "CoverageLevel", "Tier", "CoverageTier");
+    if (level) return level;
+  }
+  return null;
+}
+
+function extractPlanDates(plans: any[]): { effectiveDate: string | null; renewalDate: string | null } {
+  for (const plan of plans) {
+    const starts = extractField(plan, "PlanStarts", "EffectiveDate", "StartDate");
+    const ends = extractField(plan, "PlanEnds", "RenewalDate", "EndDate");
+    if (starts) return { effectiveDate: starts, renewalDate: ends };
+  }
+  return { effectiveDate: null, renewalDate: null };
+}
+
+function countTotalMembers(employees: any[]): number {
+  let total = 0;
+  for (const emp of employees) {
+    total++; // Employee themselves
+    total += findDependents(emp).length;
+  }
+  return total;
+}
+
+// ===== Utility =====
 
 function parseFloatSafe(val: string | null): number | null {
   if (!val) return null;
@@ -239,7 +462,7 @@ function parseFloatSafe(val: string | null): number | null {
 
 /** Recursively describe the structure of a parsed XML object (keys + types) up to maxDepth */
 function describeStructure(obj: unknown, maxDepth: number, depth = 0): unknown {
-  if (depth >= maxDepth) return typeof obj === "object" && obj !== null ? `{...${Object.keys(obj).length} keys}` : typeof obj;
+  if (depth >= maxDepth) return typeof obj === "object" && obj !== null ? `{...${Object.keys(obj as Record<string, unknown>).length} keys}` : typeof obj;
   if (Array.isArray(obj)) {
     return { _type: `Array[${obj.length}]`, _first: obj.length > 0 ? describeStructure(obj[0], maxDepth, depth + 1) : null };
   }
@@ -250,5 +473,5 @@ function describeStructure(obj: unknown, maxDepth: number, depth = 0): unknown {
     }
     return result;
   }
-  return typeof obj === "string" && obj.length > 60 ? obj.substring(0, 60) + "..." : obj;
+  return typeof obj === "string" && (obj as string).length > 60 ? (obj as string).substring(0, 60) + "..." : obj;
 }
