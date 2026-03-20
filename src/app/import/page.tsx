@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import {
   Upload, CheckCircle, AlertCircle, FileText, X,
-  ChevronLeft, ChevronRight, Loader2, Calendar,
+  Loader2,
 } from "lucide-react";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -28,6 +28,13 @@ interface ImportResult {
   employeesProcessed: number;
 }
 
+interface QueueItem {
+  file: File;
+  status: "pending" | "uploading" | "done" | "error";
+  result?: ImportResult;
+  error?: string;
+}
+
 const MONTHS = [
   "Jan", "Feb", "Mar", "Apr", "May", "Jun",
   "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
@@ -42,17 +49,26 @@ const START_YEAR = 2022;
 const END_YEAR = new Date().getFullYear();
 const YEARS = Array.from({ length: END_YEAR - START_YEAR + 1 }, (_, i) => START_YEAR + i);
 
+function formatSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
 // ─── Main Page ────────────────────────────────────────────────────────────────
 
 export default function ImportPage() {
   const [periods, setPeriods] = useState<Period[]>([]);
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState<{ year: number; month: number } | null>(null);
-  const [uploadResult, setUploadResult] = useState<ImportResult | null>(null);
-  const [uploadError, setUploadError] = useState<string | null>(null);
   const [dragTarget, setDragTarget] = useState<{ year: number; month: number } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [pendingCell, setPendingCell] = useState<{ year: number; month: number } | null>(null);
+
+  // Batch upload queue
+  const [queue, setQueue] = useState<QueueItem[]>([]);
+  const [batchProcessing, setBatchProcessing] = useState(false);
+  const [dragOver, setDragOver] = useState(false);
 
   const fetchPeriods = useCallback(() => {
     fetch("/api/import/periods")
@@ -75,10 +91,10 @@ export default function ImportPage() {
     return periodMap.get(`${year}-${month}`);
   }
 
+  // ─── Single cell upload ──────────────────────────────────────────────
+
   async function handleUpload(file: File, year: number, month: number) {
     setUploading({ year, month });
-    setUploadResult(null);
-    setUploadError(null);
 
     try {
       const formData = new FormData();
@@ -88,21 +104,17 @@ export default function ImportPage() {
 
       const res = await fetch("/api/import", { method: "POST", body: formData });
       const data = await res.json();
-
       if (!res.ok) throw new Error(data.error || "Import failed");
-
-      setUploadResult(data);
-      fetchPeriods(); // Refresh grid
-    } catch (err) {
-      setUploadError(err instanceof Error ? err.message : "Import failed");
+      fetchPeriods();
+    } catch {
+      // Silently handle — cell will remain empty for retry
     } finally {
       setUploading(null);
     }
   }
 
   function handleCellClick(year: number, month: number) {
-    const existing = getPeriod(year, month);
-    if (existing) return; // Already uploaded — locked
+    if (getPeriod(year, month)) return;
     setPendingCell({ year, month });
     fileInputRef.current?.click();
   }
@@ -119,85 +131,211 @@ export default function ImportPage() {
   function handleCellDrop(e: React.DragEvent, year: number, month: number) {
     e.preventDefault();
     setDragTarget(null);
-    const existing = getPeriod(year, month);
-    if (existing) return;
+    if (getPeriod(year, month)) return;
     const file = e.dataTransfer.files[0];
     if (file && file.name.toLowerCase().endsWith(".xml")) {
       handleUpload(file, year, month);
     }
   }
 
-  // Auto-detect upload: drop anywhere on page, detect date from XML
-  async function handleAutoUpload(file: File) {
-    setUploading({ year: 0, month: 0 }); // Show generic uploading state
-    setUploadResult(null);
-    setUploadError(null);
+  // ─── Batch upload (multiple files, auto-detect dates) ────────────────
 
-    try {
-      const formData = new FormData();
-      formData.append("file", file);
-      // Don't send year/month — let the XML date detection assign it
+  function addFilesToQueue(files: File[]) {
+    const xmlFiles = files.filter((f) => f.name.toLowerCase().endsWith(".xml"));
+    if (xmlFiles.length === 0) return;
 
-      const res = await fetch("/api/import", { method: "POST", body: formData });
-      const data = await res.json();
+    const items: QueueItem[] = xmlFiles.map((file) => ({
+      file,
+      status: "pending" as const,
+    }));
 
-      if (!res.ok) throw new Error(data.error || "Import failed");
-
-      setUploadResult(data);
-      fetchPeriods();
-    } catch (err) {
-      setUploadError(err instanceof Error ? err.message : "Import failed");
-    } finally {
-      setUploading(null);
-    }
+    setQueue((prev) => [...prev, ...items]);
   }
+
+  // Process queue sequentially
+  useEffect(() => {
+    if (batchProcessing) return;
+    const nextIndex = queue.findIndex((q) => q.status === "pending");
+    if (nextIndex === -1) return;
+
+    setBatchProcessing(true);
+
+    const item = queue[nextIndex];
+
+    // Mark as uploading
+    setQueue((prev) =>
+      prev.map((q, i) => (i === nextIndex ? { ...q, status: "uploading" as const } : q))
+    );
+
+    const formData = new FormData();
+    formData.append("file", item.file);
+
+    fetch("/api/import", { method: "POST", body: formData })
+      .then((res) => res.json().then((data) => ({ ok: res.ok, data })))
+      .then(({ ok, data }) => {
+        setQueue((prev) =>
+          prev.map((q, i) =>
+            i === nextIndex
+              ? ok
+                ? { ...q, status: "done" as const, result: data }
+                : { ...q, status: "error" as const, error: data.error || "Import failed" }
+              : q
+          )
+        );
+        if (ok) fetchPeriods();
+      })
+      .catch((err) => {
+        setQueue((prev) =>
+          prev.map((q, i) =>
+            i === nextIndex
+              ? { ...q, status: "error" as const, error: err instanceof Error ? err.message : "Import failed" }
+              : q
+          )
+        );
+      })
+      .finally(() => {
+        setBatchProcessing(false);
+      });
+  }, [queue, batchProcessing, fetchPeriods]);
+
+  function clearQueue() {
+    setQueue([]);
+  }
+
+  const queueDone = queue.filter((q) => q.status === "done").length;
+  const queueErrors = queue.filter((q) => q.status === "error").length;
+  const queueTotal = queue.length;
+  const queueActive = queue.some((q) => q.status === "pending" || q.status === "uploading");
 
   // Stats
   const totalUploaded = periods.length;
   const totalCells = YEARS.length * 12;
-  const totalGroups = new Set(periods.map((p) => `${p.year}-${p.month}`)).size;
 
   return (
     <div>
       <div className="mb-8">
         <h1 className="text-3xl font-bold tracking-tight text-bob-text">Upload Data</h1>
         <p className="text-bob-text-soft mt-1">
-          Upload XML files for each month. Data is locked once uploaded.
+          Upload XML files for each month. Date auto-detected from file. Data is locked once uploaded.
         </p>
       </div>
 
-      {/* Quick Drop — auto-detect date */}
+      {/* Bulk Drop Zone — multiple files */}
       <div className="mb-6">
         <div
-          onDragOver={(e) => { e.preventDefault(); }}
+          onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+          onDragLeave={() => setDragOver(false)}
           onDrop={(e) => {
             e.preventDefault();
-            const file = e.dataTransfer.files[0];
-            if (file && file.name.toLowerCase().endsWith(".xml")) {
-              handleAutoUpload(file);
-            }
+            setDragOver(false);
+            addFilesToQueue(Array.from(e.dataTransfer.files));
           }}
           onClick={() => {
-            setPendingCell(null); // Clear any cell selection
             const input = document.createElement("input");
             input.type = "file";
             input.accept = ".xml";
+            input.multiple = true;
             input.onchange = (e) => {
-              const file = (e.target as HTMLInputElement).files?.[0];
-              if (file) handleAutoUpload(file);
+              const files = Array.from((e.target as HTMLInputElement).files || []);
+              if (files.length > 0) addFilesToQueue(files);
             };
             input.click();
           }}
-          className="bg-white rounded-2xl border-2 border-dashed border-bob-border hover:border-bob-purple/40 hover:bg-gray-50 transition-all duration-200 cursor-pointer p-6 text-center"
+          className={`bg-white rounded-2xl border-2 border-dashed transition-all duration-200 cursor-pointer p-8 text-center ${
+            dragOver
+              ? "border-bob-purple bg-bob-purple-light/30 scale-[1.01]"
+              : "border-bob-border hover:border-bob-purple/40 hover:bg-gray-50"
+          }`}
         >
-          <div className="flex items-center justify-center gap-3">
-            <Upload className="w-5 h-5 text-bob-text-soft" />
-            <span className="text-sm font-medium text-bob-text-soft">
-              Drop XML here or click to auto-detect date from file
-            </span>
+          <div className="flex flex-col items-center gap-2">
+            <div className={`w-12 h-12 rounded-xl flex items-center justify-center transition-all ${
+              dragOver ? "bg-bob-purple-light" : "bg-bob-bg"
+            }`}>
+              <Upload className={`w-6 h-6 ${dragOver ? "text-bob-purple" : "text-bob-text-soft"}`} />
+            </div>
+            <p className="text-sm font-semibold text-bob-text">
+              {dragOver ? "Drop files here" : "Drop XML files or click to select"}
+            </p>
+            <p className="text-xs text-bob-text-soft">
+              Select multiple files — each will auto-assign to the correct month based on the date in the XML
+            </p>
           </div>
         </div>
       </div>
+
+      {/* Batch Queue */}
+      {queue.length > 0 && (
+        <div className="mb-6 bg-white rounded-2xl border border-bob-border overflow-hidden">
+          {/* Queue header */}
+          <div className="px-5 py-3 bg-bob-bg border-b border-bob-border flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <span className="text-sm font-semibold text-bob-text">
+                Upload Queue
+              </span>
+              <span className="text-xs text-bob-text-soft">
+                {queueDone} of {queueTotal} complete
+                {queueErrors > 0 && <span className="text-red-500 ml-1">({queueErrors} failed)</span>}
+              </span>
+            </div>
+            {!queueActive && (
+              <button
+                onClick={clearQueue}
+                className="text-xs text-bob-text-soft hover:text-bob-text transition-colors"
+              >
+                Clear
+              </button>
+            )}
+          </div>
+
+          {/* Progress bar */}
+          <div className="h-1.5 bg-bob-bg">
+            <div
+              className="h-full bg-gradient-to-r from-bob-purple to-bob-blue transition-all duration-500"
+              style={{ width: `${queueTotal > 0 ? ((queueDone + queueErrors) / queueTotal) * 100 : 0}%` }}
+            />
+          </div>
+
+          {/* File list */}
+          <div className="divide-y divide-bob-border-light max-h-64 overflow-y-auto">
+            {queue.map((item, i) => (
+              <div key={i} className="px-5 py-3 flex items-center gap-3">
+                <div className="flex-shrink-0">
+                  {item.status === "uploading" ? (
+                    <Loader2 className="w-4 h-4 animate-spin text-bob-purple" />
+                  ) : item.status === "done" ? (
+                    <CheckCircle className="w-4 h-4 text-emerald-500" />
+                  ) : item.status === "error" ? (
+                    <AlertCircle className="w-4 h-4 text-red-500" />
+                  ) : (
+                    <FileText className="w-4 h-4 text-gray-300" />
+                  )}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm text-bob-text truncate">{item.file.name}</p>
+                  <p className="text-xs text-bob-text-soft">
+                    {formatSize(item.file.size)}
+                    {item.status === "uploading" && " — Processing..."}
+                    {item.status === "done" && item.result && (
+                      <span className="text-emerald-600">
+                        {" — "}
+                        {item.result.month ? `${MONTH_FULL[item.result.month]} ` : ""}
+                        {item.result.year}
+                        {" · "}
+                        {item.result.clientsProcessed} groups
+                        {" · "}
+                        {item.result.employeesProcessed.toLocaleString()} employees
+                      </span>
+                    )}
+                    {item.status === "error" && (
+                      <span className="text-red-500">{" — "}{item.error}</span>
+                    )}
+                  </p>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Summary bar */}
       <div className="flex items-center gap-6 mb-4 text-xs text-bob-text-soft">
@@ -296,48 +434,6 @@ export default function ImportPage() {
         onChange={handleFileSelected}
         className="hidden"
       />
-
-      {/* Upload result toast */}
-      {uploadResult && (
-        <div className="fixed bottom-6 right-6 bg-white rounded-2xl border border-bob-border shadow-lg p-5 max-w-sm animate-fade-in-up z-50">
-          <div className="flex items-start gap-3">
-            <div className="w-8 h-8 rounded-lg bg-emerald-50 flex items-center justify-center flex-shrink-0">
-              <CheckCircle className="w-4 h-4 text-emerald-500" />
-            </div>
-            <div className="flex-1">
-              <p className="font-semibold text-bob-text text-sm">Upload complete</p>
-              <p className="text-xs text-bob-text-soft mt-0.5">
-                {uploadResult.month
-                  ? `${MONTH_FULL[uploadResult.month]} ${uploadResult.year}`
-                  : `${uploadResult.year}`}
-                {" — "}
-                {uploadResult.clientsProcessed} groups, {uploadResult.employeesProcessed.toLocaleString()} employees
-              </p>
-            </div>
-            <button onClick={() => setUploadResult(null)} className="text-gray-300 hover:text-gray-500">
-              <X className="w-4 h-4" />
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* Upload error toast */}
-      {uploadError && (
-        <div className="fixed bottom-6 right-6 bg-white rounded-2xl border border-red-200 shadow-lg p-5 max-w-sm animate-fade-in-up z-50">
-          <div className="flex items-start gap-3">
-            <div className="w-8 h-8 rounded-lg bg-red-50 flex items-center justify-center flex-shrink-0">
-              <AlertCircle className="w-4 h-4 text-red-500" />
-            </div>
-            <div className="flex-1">
-              <p className="font-semibold text-bob-text text-sm">Upload failed</p>
-              <p className="text-xs text-red-600 mt-0.5">{uploadError}</p>
-            </div>
-            <button onClick={() => setUploadError(null)} className="text-gray-300 hover:text-gray-500">
-              <X className="w-4 h-4" />
-            </button>
-          </div>
-        </div>
-      )}
     </div>
   );
 }
