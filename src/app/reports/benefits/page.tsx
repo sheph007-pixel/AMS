@@ -1,9 +1,9 @@
 "use client";
 
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useState, useRef, useCallback } from "react";
 import {
   ArrowLeft, Search, Download, Printer, ArrowUpDown, ArrowUp, ArrowDown,
-  CheckCircle, ChevronDown, ChevronRight, Info,
+  CheckCircle, ChevronDown, ChevronRight, Info, X,
 } from "lucide-react";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -67,8 +67,15 @@ interface Reconciliation {
   exceptions: Exceptions;
 }
 
+interface ModalData {
+  title: string;
+  columns: string[];
+  rows: (string | number)[][];
+}
+
 type SortKey = keyof CarrierRow;
 type SortDir = "asc" | "desc";
+type DetailType = "groups" | "eligible" | "enrolled" | "premium";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -93,90 +100,6 @@ function downloadFile(content: string, filename: string, mimeType: string) {
   a.download = filename;
   a.click();
   URL.revokeObjectURL(url);
-}
-
-interface CensusRow {
-  groupName: string;
-  employeeName: string;
-  carrier: string;
-  planName: string;
-  planType: string;
-  coverageTier: string;
-  planCost: number;
-}
-
-function censusToExcelXML(rows: CensusRow[], carrier: string): string {
-  const escXml = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-
-  // ── Sheet 1: Group Summary (adds up to carrier total) ──
-  // Aggregate by group: distinct enrolled employees + sum of PlanCost
-  const groupMap = new Map<string, { enrolled: Set<string>; premium: number }>();
-  for (const r of rows) {
-    let g = groupMap.get(r.groupName);
-    if (!g) { g = { enrolled: new Set(), premium: 0 }; groupMap.set(r.groupName, g); }
-    g.enrolled.add(r.employeeName);
-    g.premium += r.planCost;
-  }
-  const groupRows = Array.from(groupMap.entries())
-    .map(([name, data]) => ({ groupName: name, enrolled: data.enrolled.size, premium: Math.round(data.premium * 100) / 100 }))
-    .sort((a, b) => b.premium - a.premium);
-
-  const totalEnrolled = groupRows.reduce((s, r) => s + r.enrolled, 0);
-  const totalPremium = groupRows.reduce((s, r) => s + r.premium, 0);
-
-  let xml = `<?xml version="1.0"?><?mso-application progid="Excel.Sheet"?>
-<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet"
- xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet">
-<Styles>
- <Style ss:ID="Bold"><Font ss:Bold="1"/></Style>
- <Style ss:ID="Currency"><NumberFormat ss:Format="$#,##0.00"/></Style>
- <Style ss:ID="BoldCurrency"><Font ss:Bold="1"/><NumberFormat ss:Format="$#,##0.00"/></Style>
-</Styles>`;
-
-  // Sheet 1: Group Summary
-  xml += `<Worksheet ss:Name="${escXml(carrier)} - Group Summary">
-<Table>`;
-  xml += `<Row><Cell ss:StyleID="Bold"><Data ss:Type="String">Group Name</Data></Cell><Cell ss:StyleID="Bold"><Data ss:Type="String"># Enrolled</Data></Cell><Cell ss:StyleID="Bold"><Data ss:Type="String">Total Premium</Data></Cell></Row>`;
-  for (const r of groupRows) {
-    xml += "<Row>";
-    xml += `<Cell><Data ss:Type="String">${escXml(r.groupName)}</Data></Cell>`;
-    xml += `<Cell><Data ss:Type="Number">${r.enrolled}</Data></Cell>`;
-    xml += `<Cell ss:StyleID="Currency"><Data ss:Type="Number">${r.premium}</Data></Cell>`;
-    xml += "</Row>";
-  }
-  xml += "<Row>";
-  xml += `<Cell ss:StyleID="Bold"><Data ss:Type="String">TOTAL</Data></Cell>`;
-  xml += `<Cell ss:StyleID="Bold"><Data ss:Type="Number">${totalEnrolled}</Data></Cell>`;
-  xml += `<Cell ss:StyleID="BoldCurrency"><Data ss:Type="Number">${totalPremium}</Data></Cell>`;
-  xml += "</Row>";
-  xml += "</Table></Worksheet>";
-
-  // Sheet 2: Employee Detail
-  xml += `<Worksheet ss:Name="${escXml(carrier)} - Employee Detail">
-<Table>`;
-  const detailHeaders = ["Group Name", "Employee", "Plan Name", "Plan Type", "Coverage Tier", "Monthly Premium"];
-  xml += "<Row>";
-  detailHeaders.forEach((h) => { xml += `<Cell ss:StyleID="Bold"><Data ss:Type="String">${escXml(h)}</Data></Cell>`; });
-  xml += "</Row>";
-  for (const r of rows) {
-    xml += "<Row>";
-    xml += `<Cell><Data ss:Type="String">${escXml(r.groupName)}</Data></Cell>`;
-    xml += `<Cell><Data ss:Type="String">${escXml(r.employeeName)}</Data></Cell>`;
-    xml += `<Cell><Data ss:Type="String">${escXml(r.planName)}</Data></Cell>`;
-    xml += `<Cell><Data ss:Type="String">${escXml(r.planType)}</Data></Cell>`;
-    xml += `<Cell><Data ss:Type="String">${escXml(r.coverageTier)}</Data></Cell>`;
-    xml += `<Cell ss:StyleID="Currency"><Data ss:Type="Number">${r.planCost}</Data></Cell>`;
-    xml += "</Row>";
-  }
-  xml += "<Row>";
-  xml += `<Cell ss:StyleID="Bold"><Data ss:Type="String">TOTAL</Data></Cell>`;
-  xml += `<Cell><Data ss:Type="String"></Data></Cell><Cell><Data ss:Type="String"></Data></Cell><Cell><Data ss:Type="String"></Data></Cell><Cell><Data ss:Type="String"></Data></Cell>`;
-  xml += `<Cell ss:StyleID="BoldCurrency"><Data ss:Type="Number">${totalPremium}</Data></Cell>`;
-  xml += "</Row>";
-  xml += "</Table></Worksheet>";
-
-  xml += "</Workbook>";
-  return xml;
 }
 
 function toExcelXML(rows: CarrierRow[], totals: Totals): string {
@@ -214,6 +137,154 @@ function toExcelXML(rows: CarrierRow[], totals: Totals): string {
   xml += "</Row>";
   xml += "</Table></Worksheet></Workbook>";
   return xml;
+}
+
+function modalDataToCSV(data: ModalData): string {
+  const header = data.columns.map((c) => `"${c}"`).join(",");
+  const lines = data.rows.map((row) =>
+    row.map((cell) => typeof cell === "string" ? `"${cell.replace(/"/g, '""')}"` : cell).join(",")
+  );
+  return [header, ...lines].join("\n");
+}
+
+// ─── Detail Modal ─────────────────────────────────────────────────────────────
+
+function DetailModal({
+  data,
+  loading,
+  onClose,
+}: {
+  data: ModalData | null;
+  loading: boolean;
+  onClose: () => void;
+}) {
+  const modalRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    function handleEsc(e: KeyboardEvent) {
+      if (e.key === "Escape") onClose();
+    }
+    document.addEventListener("keydown", handleEsc);
+    return () => document.removeEventListener("keydown", handleEsc);
+  }, [onClose]);
+
+  function handleExportCSV() {
+    if (!data) return;
+    const csv = modalDataToCSV(data);
+    const safeName = data.title.replace(/[^a-zA-Z0-9 ]/g, "").replace(/\s+/g, "_").substring(0, 50);
+    downloadFile(csv, `${safeName}.csv`, "text/csv");
+  }
+
+  return (
+    <div
+      className="fixed inset-0 bg-black/40 z-50 flex items-start justify-center pt-12 px-4"
+      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+    >
+      <div
+        ref={modalRef}
+        className="bg-white rounded-2xl shadow-2xl w-full max-w-5xl max-h-[80vh] flex flex-col"
+      >
+        {/* Header */}
+        <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200">
+          <h3 className="text-lg font-semibold text-bob-text truncate">
+            {loading ? "Loading..." : data?.title || "Detail"}
+          </h3>
+          <div className="flex items-center gap-2">
+            {data && !loading && (
+              <button
+                onClick={handleExportCSV}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border border-bob-border rounded-lg hover:border-bob-purple/30 hover:text-bob-purple transition-colors"
+              >
+                <Download className="w-3.5 h-3.5" /> Export CSV
+              </button>
+            )}
+            <button
+              onClick={onClose}
+              className="p-1.5 rounded-lg hover:bg-gray-100 text-gray-500 hover:text-gray-700 transition-colors"
+            >
+              <X className="w-5 h-5" />
+            </button>
+          </div>
+        </div>
+
+        {/* Body */}
+        <div className="flex-1 overflow-auto p-0">
+          {loading ? (
+            <div className="flex items-center justify-center py-16">
+              <div className="w-6 h-6 border-2 border-bob-purple border-t-transparent rounded-full animate-spin" />
+            </div>
+          ) : data ? (
+            <table className="w-full text-sm">
+              <thead className="bg-gray-50 sticky top-0">
+                <tr>
+                  {data.columns.map((col, i) => (
+                    <th key={i} className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide whitespace-nowrap">
+                      {col}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100">
+                {data.rows.map((row, ri) => (
+                  <tr key={ri} className="hover:bg-gray-50">
+                    {row.map((cell, ci) => (
+                      <td key={ci} className="px-4 py-2 text-sm text-gray-700 whitespace-nowrap">
+                        {typeof cell === "number" ? cell.toLocaleString() : cell}
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          ) : (
+            <div className="text-center py-16 text-gray-400">No data</div>
+          )}
+        </div>
+
+        {/* Footer */}
+        {data && !loading && (
+          <div className="px-6 py-3 border-t border-gray-200 text-xs text-gray-500">
+            {data.rows.length.toLocaleString()} rows
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ─── Clickable Cell ───────────────────────────────────────────────────────────
+
+function ClickableCell({
+  value,
+  carrier,
+  type,
+  onClick,
+  isCurrency,
+  className,
+}: {
+  value: string | number;
+  carrier: string;
+  type: DetailType;
+  onClick: (carrier: string, type: DetailType) => void;
+  isCurrency?: boolean;
+  className?: string;
+}) {
+  const display = isCurrency
+    ? formatCurrency(value as number)
+    : typeof value === "number"
+      ? value.toLocaleString()
+      : value;
+
+  return (
+    <td className={`px-6 py-4 ${className || ""}`}>
+      <button
+        onClick={() => onClick(carrier, type)}
+        className="text-bob-text hover:text-bob-purple hover:underline transition-colors cursor-pointer"
+      >
+        {display}
+      </button>
+    </td>
+  );
 }
 
 // ─── Collapsible Section ──────────────────────────────────────────────────────
@@ -277,8 +348,12 @@ export default function BenefitsReportPage() {
   const [loading, setLoading] = useState(true);
   const [sortKey, setSortKey] = useState<SortKey>("monthlyPremium");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
-  const [downloadingCarrier, setDownloadingCarrier] = useState<string | null>(null);
   const tableRef = useRef<HTMLDivElement>(null);
+
+  // Modal state
+  const [modalOpen, setModalOpen] = useState(false);
+  const [modalLoading, setModalLoading] = useState(false);
+  const [modalData, setModalData] = useState<ModalData | null>(null);
 
   useEffect(() => {
     fetch("/api/reports/benefits")
@@ -320,21 +395,29 @@ export default function BenefitsReportPage() {
       )
     : totals || { groups: 0, eligible: 0, enrolled: 0, monthlyPremium: 0 };
 
-  async function handleCarrierClick(carrier: string) {
-    setDownloadingCarrier(carrier);
+  // Open detail modal for any cell
+  const openDetail = useCallback(async (carrier: string, type: DetailType) => {
+    setModalOpen(true);
+    setModalLoading(true);
+    setModalData(null);
     try {
-      const res = await fetch(`/api/reports/benefits/census?carrier=${encodeURIComponent(carrier)}`);
+      const res = await fetch(
+        `/api/reports/benefits/detail?carrier=${encodeURIComponent(carrier)}&type=${type}`
+      );
       const data = await res.json();
-      const censusRows: CensusRow[] = data.rows || [];
-      const xml = censusToExcelXML(censusRows, carrier);
-      const safeName = carrier.replace(/[^a-zA-Z0-9]/g, "_");
-      downloadFile(xml, `${safeName}_census.xls`, "application/vnd.ms-excel");
+      setModalData(data);
     } catch (err) {
-      console.error("Census download error:", err);
+      console.error("Detail fetch error:", err);
+      setModalData({ title: "Error loading detail", columns: [], rows: [] });
     } finally {
-      setDownloadingCarrier(null);
+      setModalLoading(false);
     }
-  }
+  }, []);
+
+  const closeModal = useCallback(() => {
+    setModalOpen(false);
+    setModalData(null);
+  }, []);
 
   function handleSort(key: SortKey) {
     if (sortKey === key) {
@@ -383,6 +466,11 @@ ${tableHTML}
 
   return (
     <div>
+      {/* Detail Modal */}
+      {modalOpen && (
+        <DetailModal data={modalData} loading={modalLoading} onClose={closeModal} />
+      )}
+
       <a href="/reports" className="inline-flex items-center gap-1.5 text-sm text-bob-text-soft hover:text-bob-purple transition-colors duration-200 mb-4">
         <ArrowLeft className="w-4 h-4" /> Back to Insights
       </a>
@@ -473,28 +561,32 @@ ${tableHTML}
               <tbody className="divide-y divide-bob-border-light">
                 {sorted.map((row) => (
                   <tr key={row.carrier} className="hover:bg-bob-bg/50 transition-colors duration-150">
+                    {/* Carrier name */}
                     <td className="px-6 py-4 font-semibold">
                       <button
-                        onClick={() => handleCarrierClick(row.carrier)}
-                        disabled={downloadingCarrier === row.carrier}
-                        className="text-bob-purple hover:underline hover:text-bob-purple/80 transition-colors cursor-pointer disabled:opacity-50"
-                        title={`Download ${row.carrier} census detail`}
+                        onClick={() => openDetail(row.carrier, "enrolled")}
+                        className="text-bob-purple hover:underline hover:text-bob-purple/80 transition-colors cursor-pointer"
                       >
-                        {downloadingCarrier === row.carrier ? "Downloading..." : row.carrier}
+                        {row.carrier}
                       </button>
                     </td>
-                    <td className="px-6 py-4 text-right font-medium">{row.groups.toLocaleString()}</td>
-                    <td className="px-6 py-4 text-right font-medium">{row.eligible.toLocaleString()}</td>
-                    <td className="px-6 py-4 text-right font-medium">{row.enrolled.toLocaleString()}</td>
-                    <td className="px-6 py-4 text-right font-semibold">{formatCurrency(row.monthlyPremium)}</td>
+                    {/* # Groups */}
+                    <ClickableCell value={row.groups} carrier={row.carrier} type="groups" onClick={openDetail} className="text-right font-medium" />
+                    {/* Eligible */}
+                    <ClickableCell value={row.eligible} carrier={row.carrier} type="eligible" onClick={openDetail} className="text-right font-medium" />
+                    {/* Enrolled */}
+                    <ClickableCell value={row.enrolled} carrier={row.carrier} type="enrolled" onClick={openDetail} className="text-right font-medium" />
+                    {/* Monthly Premium */}
+                    <ClickableCell value={row.monthlyPremium} carrier={row.carrier} type="premium" onClick={openDetail} isCurrency className="text-right font-semibold" />
                   </tr>
                 ))}
+                {/* Totals row — also clickable */}
                 <tr className="bg-bob-bg font-bold">
                   <td className="px-6 py-4 text-bob-text">Total</td>
-                  <td className="px-6 py-4 text-right">{displayTotals.groups.toLocaleString()}</td>
-                  <td className="px-6 py-4 text-right">{displayTotals.eligible.toLocaleString()}</td>
-                  <td className="px-6 py-4 text-right">{displayTotals.enrolled.toLocaleString()}</td>
-                  <td className="px-6 py-4 text-right">{formatCurrency(displayTotals.monthlyPremium)}</td>
+                  <ClickableCell value={displayTotals.groups} carrier="__all__" type="groups" onClick={openDetail} className="text-right" />
+                  <ClickableCell value={displayTotals.eligible} carrier="__all__" type="eligible" onClick={openDetail} className="text-right" />
+                  <ClickableCell value={displayTotals.enrolled} carrier="__all__" type="enrolled" onClick={openDetail} className="text-right" />
+                  <ClickableCell value={displayTotals.monthlyPremium} carrier="__all__" type="premium" onClick={openDetail} isCurrency className="text-right" />
                 </tr>
               </tbody>
             </table>
@@ -508,7 +600,6 @@ ${tableHTML}
                 <h2 className="text-lg font-semibold text-bob-text">Reconciliation & Audit</h2>
               </div>
 
-              {/* A: Summary stats */}
               <Section title="A. Data Summary" defaultOpen>
                 <div className="grid grid-cols-3 gap-4 text-sm">
                   <div className="bg-gray-50 rounded-lg p-3">
@@ -526,7 +617,6 @@ ${tableHTML}
                 </div>
               </Section>
 
-              {/* B: Carrier audit */}
               <Section title="B. Carrier Audit (with enrollment row counts)">
                 <MiniTable
                   headers={[
@@ -542,7 +632,6 @@ ${tableHTML}
                 />
               </Section>
 
-              {/* C: Company eligibility by carrier */}
               <Section title="C. Company-Level Eligibility by Carrier">
                 <p className="text-xs text-gray-500 mb-2">
                   Shows which companies contribute eligible employees to each carrier.
@@ -562,7 +651,6 @@ ${tableHTML}
                 />
               </Section>
 
-              {/* D: Company enrollment by carrier */}
               <Section title="D. Company-Level Enrollment by Carrier">
                 <MiniTable
                   headers={[
@@ -578,7 +666,6 @@ ${tableHTML}
                 />
               </Section>
 
-              {/* E: Exception counts */}
               <Section title="E. Exception / Audit Counts" defaultOpen>
                 <div className="space-y-2 text-sm">
                   <ExceptionRow label="Enrollments missing PlanIdentifier" value={reconciliation.exceptions.missingPlanIdentifier} />
@@ -589,7 +676,6 @@ ${tableHTML}
                 </div>
               </Section>
 
-              {/* F: Reconciliation note */}
               <Section title="F. Reconciliation Note">
                 <p className="text-sm text-gray-600 leading-relaxed">
                   If eligible counts appear materially higher than an external broker report,
