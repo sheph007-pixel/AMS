@@ -2,8 +2,9 @@
 
 import { useEffect, useState, useRef } from "react";
 import {
-  Search, Users, TrendingUp, Building2, Download,
-  ArrowUpDown, ArrowUp, ArrowDown,
+  Search, Users, TrendingUp, DollarSign, Download,
+  ArrowUpDown, ArrowUp, ArrowDown, Building2,
+  CheckCircle2, XCircle,
 } from "lucide-react";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -12,37 +13,49 @@ interface ClientRow {
   id: string;
   groupId: string;
   groupName: string;
-  sicCode: string | null;
   state: string | null;
-  years: number[];
-  firstYear: number | null;
-  lastYear: number | null;
-  status: "Active" | "New" | "Termed" | "Returned";
-  totalEmployees: number | null;
-  totalMembers: number | null;
-  effectiveDate: string | null;
-  renewalDate: string | null;
+  status: string;
+  activeEmployees: number | null;
+  hasMedical: boolean;
+  hasDental: boolean;
+  hasVision: boolean;
+  hasSupplemental: boolean;
 }
 
-type SortKey = "groupName" | "groupId" | "state" | "status" | "totalEmployees" | "totalMembers" | "sicCode" | "effectiveDate" | "renewalDate";
+interface YoYMetric {
+  current: number;
+  previous: number;
+}
+
+interface Summary {
+  currentYear: number;
+  lastYear: number;
+  activeGroups: YoYMetric;
+  enrolled: YoYMetric;
+  premium: YoYMetric;
+}
+
+type SortKey = "groupName" | "state" | "activeEmployees";
 type SortDir = "asc" | "desc";
 
-const statusConfig: Record<string, { bg: string; text: string; dot: string }> = {
-  Active: { bg: "bg-bob-green-light", text: "text-emerald-700", dot: "bg-bob-green" },
-  New: { bg: "bg-bob-blue-light", text: "text-blue-700", dot: "bg-bob-blue" },
-  Termed: { bg: "bg-bob-coral-light", text: "text-red-600", dot: "bg-bob-coral" },
-  Returned: { bg: "bg-bob-amber-light", text: "text-amber-700", dot: "bg-bob-amber" },
-};
-
-const filterConfig: Record<string, { active: string }> = {
-  All: { active: "bg-bob-purple text-white" },
-  Active: { active: "bg-bob-green text-white" },
-  New: { active: "bg-bob-blue text-white" },
-  Termed: { active: "bg-bob-coral text-white" },
-  Returned: { active: "bg-bob-amber text-white" },
-};
-
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+
+function pctChange(current: number, previous: number): number | null {
+  if (previous === 0) return current > 0 ? 100 : null;
+  return ((current - previous) / previous) * 100;
+}
+
+function formatPct(value: number | null): string {
+  if (value === null) return "—";
+  const sign = value >= 0 ? "+" : "";
+  return `${sign}${value.toFixed(1)}%`;
+}
+
+function formatCurrency(value: number): string {
+  if (value >= 1_000_000) return `$${(value / 1_000_000).toFixed(1)}M`;
+  if (value >= 1_000) return `$${(value / 1_000).toFixed(0)}K`;
+  return `$${value.toLocaleString()}`;
+}
 
 function downloadFile(content: string, filename: string, mimeType: string) {
   const blob = new Blob([content], { type: mimeType });
@@ -55,19 +68,16 @@ function downloadFile(content: string, filename: string, mimeType: string) {
 }
 
 function toCSV(rows: ClientRow[]): string {
-  const header = "Group Name,Group ID,State,SIC Code,Status,Employees,Members,Effective Date,Renewal Date,Years";
+  const header = "Group,State,Active Employees,Medical,Dental,Vision,Supplemental";
   const lines = rows.map((r) =>
     [
       `"${r.groupName}"`,
-      `"${r.groupId}"`,
       r.state || "",
-      r.sicCode || "",
-      r.status,
-      r.totalEmployees ?? "",
-      r.totalMembers ?? "",
-      r.effectiveDate || "",
-      r.renewalDate || "",
-      `"${r.years.join(", ")}"`,
+      r.activeEmployees ?? "",
+      r.hasMedical ? "Yes" : "No",
+      r.hasDental ? "Yes" : "No",
+      r.hasVision ? "Yes" : "No",
+      r.hasSupplemental ? "Yes" : "No",
     ].join(",")
   );
   return [header, ...lines].join("\n");
@@ -77,9 +87,8 @@ function toCSV(rows: ClientRow[]): string {
 
 export default function GroupsPage() {
   const [clients, setClients] = useState<ClientRow[]>([]);
-  const [systemYears, setSystemYears] = useState<number[]>([]);
+  const [summary, setSummary] = useState<Summary | null>(null);
   const [search, setSearch] = useState("");
-  const [statusFilter, setStatusFilter] = useState<string>("All");
   const [loading, setLoading] = useState(true);
   const [sortKey, setSortKey] = useState<SortKey>("groupName");
   const [sortDir, setSortDir] = useState<SortDir>("asc");
@@ -90,31 +99,26 @@ export default function GroupsPage() {
       .then((res) => res.json())
       .then((data) => {
         setClients(data.clients || []);
-        setSystemYears(data.systemYears || []);
+        setSummary(data.summary || null);
       })
       .finally(() => setLoading(false));
   }, []);
 
   const filtered = clients.filter((c) => {
-    const matchesSearch =
-      !search ||
-      c.groupName.toLowerCase().includes(search.toLowerCase()) ||
-      c.groupId.toLowerCase().includes(search.toLowerCase()) ||
-      (c.state && c.state.toLowerCase().includes(search.toLowerCase())) ||
-      (c.sicCode && c.sicCode.toLowerCase().includes(search.toLowerCase()));
-    const matchesStatus = statusFilter === "All" || c.status === statusFilter;
-    return matchesSearch && matchesStatus;
+    if (!search) return true;
+    const q = search.toLowerCase();
+    return (
+      c.groupName.toLowerCase().includes(q) ||
+      (c.state && c.state.toLowerCase().includes(q))
+    );
   });
 
   const sorted = [...filtered].sort((a, b) => {
     const aVal = a[sortKey];
     const bVal = b[sortKey];
-
-    // Handle nulls — push to end
     if (aVal == null && bVal == null) return 0;
     if (aVal == null) return 1;
     if (bVal == null) return -1;
-
     if (typeof aVal === "string" && typeof bVal === "string") {
       return sortDir === "asc" ? aVal.localeCompare(bVal) : bVal.localeCompare(aVal);
     }
@@ -124,23 +128,12 @@ export default function GroupsPage() {
     return 0;
   });
 
-  const statusCounts = clients.reduce(
-    (acc, c) => {
-      acc[c.status] = (acc[c.status] || 0) + 1;
-      return acc;
-    },
-    {} as Record<string, number>
-  );
-
-  const activeCount = statusCounts["Active"] || 0;
-  const newCount = statusCounts["New"] || 0;
-
   function handleSort(key: SortKey) {
     if (sortKey === key) {
       setSortDir(sortDir === "asc" ? "desc" : "asc");
     } else {
       setSortKey(key);
-      setSortDir(key === "groupName" || key === "groupId" || key === "state" || key === "status" || key === "sicCode" ? "asc" : "desc");
+      setSortDir(key === "activeEmployees" ? "desc" : "asc");
     }
   }
 
@@ -155,96 +148,95 @@ export default function GroupsPage() {
     downloadFile(toCSV(sorted), "groups.csv", "text/csv");
   }
 
-  const columns: { key: SortKey; label: string; align: string }[] = [
-    { key: "groupName", label: "Group Name", align: "text-left" },
-    { key: "groupId", label: "Group ID", align: "text-left" },
-    { key: "state", label: "State", align: "text-left" },
-    { key: "sicCode", label: "SIC", align: "text-left" },
-    { key: "status", label: "Status", align: "text-left" },
-    { key: "totalEmployees", label: "Employees", align: "text-right" },
-    { key: "totalMembers", label: "Members", align: "text-right" },
-    { key: "effectiveDate", label: "Effective", align: "text-left" },
-    { key: "renewalDate", label: "Renewal", align: "text-left" },
-  ];
+  // Summary card data
+  const cards = summary
+    ? [
+        {
+          label: "Active Groups",
+          icon: <Building2 className="w-5 h-5 text-bob-purple" />,
+          iconBg: "bg-bob-purple-light",
+          current: summary.activeGroups.current,
+          previous: summary.activeGroups.previous,
+          format: (v: number) => v.toLocaleString(),
+          pct: pctChange(summary.activeGroups.current, summary.activeGroups.previous),
+        },
+        {
+          label: "# Enrolled",
+          icon: <Users className="w-5 h-5 text-bob-green" />,
+          iconBg: "bg-bob-green-light",
+          current: summary.enrolled.current,
+          previous: summary.enrolled.previous,
+          format: (v: number) => v.toLocaleString(),
+          pct: pctChange(summary.enrolled.current, summary.enrolled.previous),
+        },
+        {
+          label: "Premium",
+          icon: <DollarSign className="w-5 h-5 text-bob-blue" />,
+          iconBg: "bg-bob-blue-light",
+          current: summary.premium.current,
+          previous: summary.premium.previous,
+          format: formatCurrency,
+          pct: pctChange(summary.premium.current, summary.premium.previous),
+        },
+      ]
+    : [];
 
   return (
     <div>
       {/* Header */}
       <div className="mb-8">
-        <h1 className="text-3xl font-bold tracking-tight text-bob-text">Your Groups</h1>
-        <p className="text-bob-text-soft mt-1">
-          All groups across your community
-        </p>
+        <h1 className="text-3xl font-bold tracking-tight text-bob-text">Groups</h1>
+        <p className="text-bob-text-soft mt-1">All groups in employee benefits program</p>
       </div>
 
-      {/* Stat cards */}
-      <div className="grid grid-cols-3 gap-4 mb-8 stagger-children">
-        <div className="bg-white rounded-2xl border border-bob-border p-5 hover:shadow-md transition-shadow duration-300">
-          <div className="flex items-center gap-3 mb-3">
-            <div className="w-10 h-10 rounded-xl bg-bob-purple-light flex items-center justify-center">
-              <Building2 className="w-5 h-5 text-bob-purple" />
+      {/* Stat cards — YoY comparison */}
+      {summary && (
+        <div className="grid grid-cols-3 gap-4 mb-8 stagger-children">
+          {cards.map((card) => (
+            <div
+              key={card.label}
+              className="bg-white rounded-2xl border border-bob-border p-5 hover:shadow-md transition-shadow duration-300"
+            >
+              <div className="flex items-center gap-3 mb-3">
+                <div className={`w-10 h-10 rounded-xl ${card.iconBg} flex items-center justify-center`}>
+                  {card.icon}
+                </div>
+                <span className="text-sm font-medium text-bob-text-soft">{card.label}</span>
+              </div>
+              <p className="text-3xl font-bold text-bob-text">{card.format(card.current)}</p>
+              <div className="flex items-center gap-3 mt-2">
+                <span className="text-xs text-bob-text-soft">
+                  {summary.currentYear}: <span className="font-semibold text-bob-text">{card.format(card.current)}</span>
+                </span>
+                <span className="text-xs text-bob-text-soft">
+                  {summary.lastYear}: <span className="font-semibold text-bob-text">{card.format(card.previous)}</span>
+                </span>
+                <span
+                  className={`text-xs font-semibold px-1.5 py-0.5 rounded ${
+                    card.pct !== null && card.pct >= 0
+                      ? "text-emerald-700 bg-emerald-50"
+                      : "text-red-600 bg-red-50"
+                  }`}
+                >
+                  {formatPct(card.pct)}
+                </span>
+              </div>
             </div>
-            <span className="text-sm font-medium text-bob-text-soft">Total Groups</span>
-          </div>
-          <p className="text-3xl font-bold text-bob-text">{clients.length}</p>
-          <p className="text-xs text-bob-text-soft mt-1">
-            across {systemYears.length} year{systemYears.length !== 1 ? "s" : ""}
-          </p>
+          ))}
         </div>
-        <div className="bg-white rounded-2xl border border-bob-border p-5 hover:shadow-md transition-shadow duration-300">
-          <div className="flex items-center gap-3 mb-3">
-            <div className="w-10 h-10 rounded-xl bg-bob-green-light flex items-center justify-center">
-              <Users className="w-5 h-5 text-bob-green" />
-            </div>
-            <span className="text-sm font-medium text-bob-text-soft">Active</span>
-          </div>
-          <p className="text-3xl font-bold text-bob-text">{activeCount}</p>
-          <p className="text-xs text-bob-text-soft mt-1">currently enrolled groups</p>
-        </div>
-        <div className="bg-white rounded-2xl border border-bob-border p-5 hover:shadow-md transition-shadow duration-300">
-          <div className="flex items-center gap-3 mb-3">
-            <div className="w-10 h-10 rounded-xl bg-bob-blue-light flex items-center justify-center">
-              <TrendingUp className="w-5 h-5 text-bob-blue" />
-            </div>
-            <span className="text-sm font-medium text-bob-text-soft">New This Cycle</span>
-          </div>
-          <p className="text-3xl font-bold text-bob-text">{newCount}</p>
-          <p className="text-xs text-bob-text-soft mt-1">recently onboarded</p>
-        </div>
-      </div>
+      )}
 
-      {/* Search + Filters + Export */}
+      {/* Search + Export */}
       <div className="flex gap-4 mb-5 flex-wrap items-center">
         <div className="relative flex-1 min-w-[240px]">
           <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-bob-text-soft" />
           <input
             type="text"
-            placeholder="Search groups, IDs, states, or SIC codes..."
+            placeholder="Search groups or states..."
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             className="w-full pl-11 pr-4 py-2.5 bg-white border border-bob-border rounded-2xl text-sm focus:outline-none focus:ring-2 focus:ring-bob-purple/30 focus:border-bob-purple transition-all duration-200 placeholder:text-gray-400"
           />
-        </div>
-        <div className="flex gap-2">
-          {["All", "Active", "New", "Termed", "Returned"].map((s) => {
-            const isActive = statusFilter === s;
-            const conf = filterConfig[s];
-            return (
-              <button
-                key={s}
-                onClick={() => setStatusFilter(s)}
-                className={`px-3 py-2 text-sm font-medium rounded-2xl border transition-all duration-200 ${
-                  isActive
-                    ? `${conf.active} border-transparent shadow-sm`
-                    : "bg-white text-bob-text-soft border-bob-border hover:border-gray-300 hover:text-bob-text"
-                }`}
-              >
-                {s}
-                {s !== "All" && statusCounts[s] ? ` ${statusCounts[s]}` : ""}
-                {s === "All" ? ` ${clients.length}` : ""}
-              </button>
-            );
-          })}
         </div>
         <button
           onClick={handleExportCSV}
@@ -271,7 +263,7 @@ export default function GroupsPage() {
           <p className="text-bob-text-soft text-sm">
             {clients.length === 0
               ? "Upload an XML file to get started"
-              : "Try adjusting your search or filters"}
+              : "Try adjusting your search"}
           </p>
         </div>
       ) : (
@@ -281,85 +273,67 @@ export default function GroupsPage() {
               <table className="w-full text-sm">
                 <thead className="bg-bob-bg border-b border-bob-border">
                   <tr>
-                    {columns.map((col) => (
-                      <th
-                        key={col.key}
-                        className={`${col.align} px-4 py-3 font-semibold text-bob-text-soft cursor-pointer hover:text-bob-text select-none transition-colors duration-200 whitespace-nowrap text-xs`}
-                        onClick={() => handleSort(col.key)}
-                      >
-                        {col.label} <SortIcon column={col.key} />
-                      </th>
-                    ))}
-                    <th className="px-4 py-3 text-left font-semibold text-bob-text-soft text-xs whitespace-nowrap">
-                      Years
+                    <th
+                      className="text-left px-4 py-3 font-semibold text-bob-text-soft cursor-pointer hover:text-bob-text select-none transition-colors duration-200 whitespace-nowrap text-xs"
+                      onClick={() => handleSort("groupName")}
+                    >
+                      Group <SortIcon column="groupName" />
                     </th>
+                    <th
+                      className="text-left px-4 py-3 font-semibold text-bob-text-soft cursor-pointer hover:text-bob-text select-none transition-colors duration-200 whitespace-nowrap text-xs"
+                      onClick={() => handleSort("state")}
+                    >
+                      State <SortIcon column="state" />
+                    </th>
+                    <th
+                      className="text-right px-4 py-3 font-semibold text-bob-text-soft cursor-pointer hover:text-bob-text select-none transition-colors duration-200 whitespace-nowrap text-xs"
+                      onClick={() => handleSort("activeEmployees")}
+                    >
+                      # Employees <SortIcon column="activeEmployees" />
+                    </th>
+                    <th className="text-center px-4 py-3 font-semibold text-bob-text-soft text-xs whitespace-nowrap">Medical</th>
+                    <th className="text-center px-4 py-3 font-semibold text-bob-text-soft text-xs whitespace-nowrap">Dental</th>
+                    <th className="text-center px-4 py-3 font-semibold text-bob-text-soft text-xs whitespace-nowrap">Vision</th>
+                    <th className="text-center px-4 py-3 font-semibold text-bob-text-soft text-xs whitespace-nowrap">Supplemental</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-bob-border-light">
-                  {sorted.map((row) => {
-                    const sc = statusConfig[row.status];
-                    return (
-                      <tr key={row.id} className="hover:bg-bob-bg/50 transition-colors duration-150 group">
-                        {/* Group Name */}
-                        <td className="px-4 py-3 font-medium">
-                          <a
-                            href={`/clients/${row.id}`}
-                            className="text-bob-purple hover:underline hover:text-bob-purple/80 transition-colors"
-                          >
-                            {row.groupName}
-                          </a>
-                        </td>
-                        {/* Group ID */}
-                        <td className="px-4 py-3 text-bob-text-soft font-mono text-xs">
-                          {row.groupId}
-                        </td>
-                        {/* State */}
-                        <td className="px-4 py-3 text-bob-text-soft">
-                          {row.state || "—"}
-                        </td>
-                        {/* SIC */}
-                        <td className="px-4 py-3 text-bob-text-soft font-mono text-xs">
-                          {row.sicCode || "—"}
-                        </td>
-                        {/* Status */}
-                        <td className="px-4 py-3">
-                          <span className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 text-xs font-medium rounded-full ${sc.bg} ${sc.text}`}>
-                            <span className={`w-1.5 h-1.5 rounded-full ${sc.dot}`} />
-                            {row.status}
-                          </span>
-                        </td>
-                        {/* Employees */}
-                        <td className="px-4 py-3 text-right font-medium tabular-nums">
-                          {row.totalEmployees != null ? row.totalEmployees.toLocaleString() : "—"}
-                        </td>
-                        {/* Members */}
-                        <td className="px-4 py-3 text-right font-medium tabular-nums">
-                          {row.totalMembers != null ? row.totalMembers.toLocaleString() : "—"}
-                        </td>
-                        {/* Effective Date */}
-                        <td className="px-4 py-3 text-bob-text-soft text-xs whitespace-nowrap">
-                          {row.effectiveDate || "—"}
-                        </td>
-                        {/* Renewal Date */}
-                        <td className="px-4 py-3 text-bob-text-soft text-xs whitespace-nowrap">
-                          {row.renewalDate || "—"}
-                        </td>
-                        {/* Years */}
-                        <td className="px-4 py-3">
-                          <div className="flex gap-1">
-                            {row.years.map((yr) => (
-                              <span
-                                key={yr}
-                                className="px-2 py-0.5 text-xs font-medium bg-bob-bg text-bob-text-soft rounded"
-                              >
-                                {yr}
-                              </span>
-                            ))}
-                          </div>
-                        </td>
-                      </tr>
-                    );
-                  })}
+                  {sorted.map((row) => (
+                    <tr key={row.id} className="hover:bg-bob-bg/50 transition-colors duration-150 group">
+                      <td className="px-4 py-3 font-medium">
+                        <a
+                          href={`/clients/${row.id}`}
+                          className="text-bob-purple hover:underline hover:text-bob-purple/80 transition-colors"
+                        >
+                          {row.groupName}
+                        </a>
+                      </td>
+                      <td className="px-4 py-3 text-bob-text-soft">{row.state || "—"}</td>
+                      <td className="px-4 py-3 text-right font-medium tabular-nums">
+                        {row.activeEmployees != null ? row.activeEmployees.toLocaleString() : "—"}
+                      </td>
+                      <td className="px-4 py-3 text-center">
+                        {row.hasMedical
+                          ? <CheckCircle2 className="w-4 h-4 text-emerald-500 inline" />
+                          : <XCircle className="w-4 h-4 text-gray-300 inline" />}
+                      </td>
+                      <td className="px-4 py-3 text-center">
+                        {row.hasDental
+                          ? <CheckCircle2 className="w-4 h-4 text-emerald-500 inline" />
+                          : <XCircle className="w-4 h-4 text-gray-300 inline" />}
+                      </td>
+                      <td className="px-4 py-3 text-center">
+                        {row.hasVision
+                          ? <CheckCircle2 className="w-4 h-4 text-emerald-500 inline" />
+                          : <XCircle className="w-4 h-4 text-gray-300 inline" />}
+                      </td>
+                      <td className="px-4 py-3 text-center">
+                        {row.hasSupplemental
+                          ? <CheckCircle2 className="w-4 h-4 text-emerald-500 inline" />
+                          : <XCircle className="w-4 h-4 text-gray-300 inline" />}
+                      </td>
+                    </tr>
+                  ))}
                 </tbody>
               </table>
             </div>
