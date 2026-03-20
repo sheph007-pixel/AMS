@@ -62,6 +62,17 @@ model BenefitPlan {
   clientSnapshot ClientSnapshot @relation(fields: [clientSnapshotId], references: [id], onDelete: Cascade)
 }
 
+/// Exclusion rule — carriers/entities that must be filtered out of the system.
+model ExclusionRule {
+  id          String   @id @default(cuid())
+  field       String   /// Field to match: "carrier", "planName", "groupName"
+  value       String   /// Exact value to exclude
+  description String?  /// Human-readable reason for the rule
+  createdAt   DateTime @default(now())
+
+  @@unique([field, value])
+}
+
 /// One row per employee per client per year.
 model EmployeeSnapshot {
   id               String @id @default(cuid())

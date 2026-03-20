@@ -26,6 +26,9 @@ export default function RootLayout({
               <a href="/import" className="text-sm font-medium text-gray-700 hover:text-gray-900">
                 Import
               </a>
+              <a href="/rules" className="text-sm font-medium text-gray-700 hover:text-gray-900">
+                Rules
+              </a>
             </div>
           </div>
         </nav>

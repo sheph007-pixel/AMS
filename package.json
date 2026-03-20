@@ -4,8 +4,9 @@
   "scripts": {
     "dev": "next dev",
     "build": "prisma generate && next build",
-    "start": "prisma db push --skip-generate && next start -H 0.0.0.0 -p ${PORT:-3000}",
-    "postinstall": "prisma generate"
+    "start": "prisma db push --skip-generate && npx tsx prisma/seed.ts && next start -H 0.0.0.0 -p ${PORT:-3000}",
+    "postinstall": "prisma generate",
+    "seed": "npx tsx prisma/seed.ts"
   },
   "engines": {
     "node": ">=18"
@@ -23,6 +24,7 @@
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
     "tailwindcss": "^4.2.2",
+    "tsx": "^4.19.0",
     "typescript": "^5.8.0"
   },
   "devDependencies": {}

@@ -53,6 +53,9 @@ export async function importAnnualXml(
 ): Promise<ImportResult> {
   const parsed = parser.parse(xmlContent);
 
+  // Load exclusion rules from the database
+  const exclusionRules = await prisma.exclusionRule.findMany();
+
   const companies = findCompanies(parsed);
   const debugStructure = describeStructure(parsed, 4);
   const rawPreview = xmlContent.substring(0, 2000);
@@ -168,11 +171,16 @@ export async function importAnnualXml(
     // --- Count enrollees per plan from employee enrollment data ---
     const enrolleeCountByPlan = countEnrolleesByPlan(employees);
 
-    // --- Import benefit plans ---
+    // --- Import benefit plans (filtered by exclusion rules) ---
     for (const plan of plans) {
       const planType = derivePlanType(plan);
       const carrier = extractField(plan, "Carrier");
       const planName = extractField(plan, "PlanName", "Name");
+
+      // Check exclusion rules — skip if any rule matches
+      if (isExcluded({ carrier, planName, planType, groupName }, exclusionRules)) {
+        continue;
+      }
       const policyNumber = extractField(plan, "PolicyNumber");
       const groupNumber = extractField(plan, "GroupNumber");
       const planIdentifier = extractField(plan, "PlanIdentifier");
@@ -450,6 +458,23 @@ function deriveCoverageTier(enrollments: any[]): string | null {
  * Count how many employees are enrolled in each plan by scanning all employee enrollments.
  * Returns a Map keyed by PlanIdentifier (or PlanName) → count.
  */
+/**
+ * Check if a plan should be excluded based on exclusion rules.
+ * Matches are case-insensitive and support partial "contains" matching.
+ */
+function isExcluded(
+  fields: Record<string, string | null>,
+  rules: { field: string; value: string }[]
+): boolean {
+  for (const rule of rules) {
+    const fieldValue = fields[rule.field];
+    if (fieldValue && fieldValue.toLowerCase().includes(rule.value.toLowerCase())) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function countEnrolleesByPlan(employees: any[]): Map<string, number> {
   const counts = new Map<string, number>();
   for (const emp of employees) {
