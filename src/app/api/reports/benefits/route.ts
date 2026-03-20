@@ -290,6 +290,7 @@ export async function GET() {
       .filter((e) => e.eligibleEmployees.size > 0)
       .map((e) => ({
         carrier: e.carrier,
+        groups: carrierCompanies.get(e.carrier)?.size || 0,
         eligible: e.eligibleEmployees.size,
         enrolled: e.enrolledEmployees.size,
         monthlyPremium: Math.round(e.monthlyPremium * 100) / 100,
@@ -297,6 +298,7 @@ export async function GET() {
       .sort((a, b) => b.monthlyPremium - a.monthlyPremium);
 
     const totals = {
+      groups: totalCompanies,
       eligible: rows.reduce((s, r) => s + r.eligible, 0),
       enrolled: rows.reduce((s, r) => s + r.enrolled, 0),
       monthlyPremium: Math.round(rows.reduce((s, r) => s + r.monthlyPremium, 0) * 100) / 100,

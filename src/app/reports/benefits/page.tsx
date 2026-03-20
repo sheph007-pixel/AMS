@@ -10,12 +10,14 @@ import {
 
 interface CarrierRow {
   carrier: string;
+  groups: number;
   eligible: number;
   enrolled: number;
   monthlyPremium: number;
 }
 
 interface Totals {
+  groups: number;
   eligible: number;
   enrolled: number;
   monthlyPremium: number;
@@ -75,11 +77,11 @@ function formatCurrency(val: number): string {
 }
 
 function toCSV(rows: CarrierRow[], totals: Totals): string {
-  const header = "Carrier,Eligible Employees,Enrolled Employees,Monthly Premium";
+  const header = "Carrier,# Groups,Eligible Employees,Enrolled Employees,Monthly Premium";
   const lines = rows.map(
-    (r) => `"${r.carrier}",${r.eligible},${r.enrolled},${r.monthlyPremium.toFixed(2)}`
+    (r) => `"${r.carrier}",${r.groups},${r.eligible},${r.enrolled},${r.monthlyPremium.toFixed(2)}`
   );
-  lines.push(`"-- Total --",${totals.eligible},${totals.enrolled},${totals.monthlyPremium.toFixed(2)}`);
+  lines.push(`"-- Total --",${totals.groups},${totals.eligible},${totals.enrolled},${totals.monthlyPremium.toFixed(2)}`);
   return [header, ...lines].join("\n");
 }
 
@@ -179,7 +181,7 @@ function censusToExcelXML(rows: CensusRow[], carrier: string): string {
 
 function toExcelXML(rows: CarrierRow[], totals: Totals): string {
   const escXml = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-  const headers = ["Carrier", "Eligible Employees", "Enrolled Employees", "Monthly Premium"];
+  const headers = ["Carrier", "# Groups", "Eligible Employees", "Enrolled Employees", "Monthly Premium"];
 
   let xml = `<?xml version="1.0"?><?mso-application progid="Excel.Sheet"?>
 <Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet"
@@ -197,6 +199,7 @@ function toExcelXML(rows: CarrierRow[], totals: Totals): string {
   for (const r of rows) {
     xml += "<Row>";
     xml += `<Cell><Data ss:Type="String">${escXml(r.carrier)}</Data></Cell>`;
+    xml += `<Cell><Data ss:Type="Number">${r.groups}</Data></Cell>`;
     xml += `<Cell><Data ss:Type="Number">${r.eligible}</Data></Cell>`;
     xml += `<Cell><Data ss:Type="Number">${r.enrolled}</Data></Cell>`;
     xml += `<Cell ss:StyleID="Currency"><Data ss:Type="Number">${r.monthlyPremium}</Data></Cell>`;
@@ -204,6 +207,7 @@ function toExcelXML(rows: CarrierRow[], totals: Totals): string {
   }
   xml += "<Row>";
   xml += `<Cell ss:StyleID="Bold"><Data ss:Type="String">-- Total --</Data></Cell>`;
+  xml += `<Cell ss:StyleID="Bold"><Data ss:Type="Number">${totals.groups}</Data></Cell>`;
   xml += `<Cell ss:StyleID="Bold"><Data ss:Type="Number">${totals.eligible}</Data></Cell>`;
   xml += `<Cell ss:StyleID="Bold"><Data ss:Type="Number">${totals.enrolled}</Data></Cell>`;
   xml += `<Cell ss:StyleID="BoldCurrency"><Data ss:Type="Number">${totals.monthlyPremium}</Data></Cell>`;
@@ -307,13 +311,14 @@ export default function BenefitsReportPage() {
   const displayTotals = isFiltered
     ? filtered.reduce(
         (acc, r) => ({
+          groups: acc.groups + r.groups,
           eligible: acc.eligible + r.eligible,
           enrolled: acc.enrolled + r.enrolled,
           monthlyPremium: acc.monthlyPremium + r.monthlyPremium,
         }),
-        { eligible: 0, enrolled: 0, monthlyPremium: 0 }
+        { groups: 0, eligible: 0, enrolled: 0, monthlyPremium: 0 }
       )
-    : totals || { eligible: 0, enrolled: 0, monthlyPremium: 0 };
+    : totals || { groups: 0, eligible: 0, enrolled: 0, monthlyPremium: 0 };
 
   async function handleCarrierClick(carrier: string) {
     setDownloadingCarrier(carrier);
@@ -450,6 +455,7 @@ ${tableHTML}
                 <tr>
                   {([
                     { key: "carrier" as SortKey, label: "Carrier", align: "text-left" },
+                    { key: "groups" as SortKey, label: "# Groups", align: "text-right" },
                     { key: "eligible" as SortKey, label: "Eligible Employees", align: "text-right" },
                     { key: "enrolled" as SortKey, label: "Enrolled Employees", align: "text-right" },
                     { key: "monthlyPremium" as SortKey, label: "Monthly Premium", align: "text-right" },
@@ -477,6 +483,7 @@ ${tableHTML}
                         {downloadingCarrier === row.carrier ? "Downloading..." : row.carrier}
                       </button>
                     </td>
+                    <td className="px-6 py-4 text-right font-medium">{row.groups.toLocaleString()}</td>
                     <td className="px-6 py-4 text-right font-medium">{row.eligible.toLocaleString()}</td>
                     <td className="px-6 py-4 text-right font-medium">{row.enrolled.toLocaleString()}</td>
                     <td className="px-6 py-4 text-right font-semibold">{formatCurrency(row.monthlyPremium)}</td>
@@ -484,6 +491,7 @@ ${tableHTML}
                 ))}
                 <tr className="bg-bob-bg font-bold">
                   <td className="px-6 py-4 text-bob-text">Total</td>
+                  <td className="px-6 py-4 text-right">{displayTotals.groups.toLocaleString()}</td>
                   <td className="px-6 py-4 text-right">{displayTotals.eligible.toLocaleString()}</td>
                   <td className="px-6 py-4 text-right">{displayTotals.enrolled.toLocaleString()}</td>
                   <td className="px-6 py-4 text-right">{formatCurrency(displayTotals.monthlyPremium)}</td>
