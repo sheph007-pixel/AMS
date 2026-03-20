@@ -5,79 +5,100 @@ import { getExclusionRules, isExcluded } from "@/lib/exclusions";
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 /**
- * Benefits Report — latest snapshot per client.
+ * Benefits Report — uses the latest data period across all snapshots.
  *
- * 1. For each client, take the latest snapshot (highest year+month)
- * 2. Use BenefitPlan records (pre-computed during import) for premium & plan counts
- * 3. Count unique employees per carrier from enrollment metadata
- * 4. Aggregate by carrier
+ * Logic:
+ * 1. Find the latest period (max year+month) across all snapshots
+ * 2. Only include snapshots from that exact period
+ * 3. Build carrier lookup from BenefitPlan records
+ * 4. For each active employee, scan enrollments from metadata:
+ *    - Eligible: has any enrollment record for a carrier (even if declined)
+ *    - Enrolled: has an active enrollment (not declined, coverage not ended)
+ *    - Monthly Premium: sum of PlanCost from active enrollments
+ * 5. All counts are unique employees per carrier (deduplicated)
  */
 export async function GET() {
   try {
     const exclusionRules = await getExclusionRules();
 
-    // Get latest snapshot per client
-    const clients = await prisma.client.findMany({
+    // ---- Step 1: Find the latest data period ----
+    const latestSnapshot = await prisma.clientSnapshot.findFirst({
+      orderBy: [{ year: "desc" }, { month: "desc" }],
+      select: { year: true, month: true },
+    });
+
+    if (!latestSnapshot) {
+      return NextResponse.json({
+        rows: [],
+        totals: { eligible: 0, enrolled: 0, monthlyPremium: 0 },
+        lastUpload: null,
+        dataPeriod: null,
+      });
+    }
+
+    const { year: latestYear, month: latestMonth } = latestSnapshot;
+
+    // ---- Step 2: Load all snapshots from the latest period ----
+    const snapshots = await prisma.clientSnapshot.findMany({
+      where: { year: latestYear, month: latestMonth },
       include: {
-        snapshots: {
-          include: {
-            benefitPlans: true,
-            employees: true,
-          },
-          orderBy: [{ year: "desc" }, { month: "desc" }],
-          take: 1,
-        },
+        client: true,
+        benefitPlans: true,
+        employees: true,
       },
     });
 
-    const filteredClients = clients.filter(
-      (c) => !isExcluded({ groupName: c.groupName }, exclusionRules)
-    );
-
     let latestImportDate: Date | null = null;
-    let latestYear = 0;
-    let latestMonth = 0;
 
     const carrierMap = new Map<
       string,
       {
         carrier: string;
+        eligibleEmployees: Set<string>;
         enrolledEmployees: Set<string>;
-        companies: Set<string>;
-        plans: Set<string>;
-        totalPremium: number;
+        monthlyPremium: number;
       }
     >();
 
-    const companiesWithData = new Set<string>();
+    function getOrCreateCarrier(carrier: string) {
+      let entry = carrierMap.get(carrier);
+      if (!entry) {
+        entry = {
+          carrier,
+          eligibleEmployees: new Set(),
+          enrolledEmployees: new Set(),
+          monthlyPremium: 0,
+        };
+        carrierMap.set(carrier, entry);
+      }
+      return entry;
+    }
 
-    for (const client of filteredClients) {
-      const snapshot = client.snapshots[0];
-      if (!snapshot) continue;
+    for (const snapshot of snapshots) {
+      // Skip excluded groups
+      if (isExcluded({ groupName: snapshot.client.groupName }, exclusionRules)) {
+        continue;
+      }
 
+      // Track latest import date
       if (!latestImportDate || snapshot.importedAt > latestImportDate) {
         latestImportDate = snapshot.importedAt;
       }
-      if (
-        snapshot.year > latestYear ||
-        (snapshot.year === latestYear && snapshot.month > latestMonth)
-      ) {
-        latestYear = snapshot.year;
-        latestMonth = snapshot.month;
-      }
 
-      // ---- Step 1: Build plan lookup from BenefitPlan records ----
-      // Maps PlanIdentifier (or PlanName) → carrier
+      // ---- Step 3: Build plan lookup for this snapshot ----
+      // Maps PlanIdentifier (or PlanName) → carrier name
       const planKeyToCarrier = new Map<string, string>();
-      const nonExcludedPlans = snapshot.benefitPlans.filter(
-        (bp) =>
-          !isExcluded(
+
+      for (const bp of snapshot.benefitPlans) {
+        if (
+          isExcluded(
             { carrier: bp.carrier, planName: bp.planName, planType: bp.planType },
             exclusionRules
           )
-      );
+        ) {
+          continue;
+        }
 
-      for (const bp of nonExcludedPlans) {
         const carrier = bp.carrier || "Unspecified Carrier";
 
         // Register by PlanIdentifier from metadata
@@ -87,45 +108,17 @@ export async function GET() {
             const planId = meta.PlanIdentifier || meta.planIdentifier;
             if (planId) planKeyToCarrier.set(String(planId), carrier);
           } catch {
-            /* ignore */
+            /* ignore parse errors */
           }
         }
+
         // Register by PlanName
         if (bp.planName) planKeyToCarrier.set(bp.planName, carrier);
       }
 
-      if (nonExcludedPlans.length === 0) continue;
+      if (planKeyToCarrier.size === 0) continue;
 
-      // ---- Step 2: Aggregate premium & plan counts from BenefitPlan records ----
-      for (const bp of nonExcludedPlans) {
-        const carrier = bp.carrier || "Unspecified Carrier";
-
-        let entry = carrierMap.get(carrier);
-        if (!entry) {
-          entry = {
-            carrier,
-            enrolledEmployees: new Set(),
-            companies: new Set(),
-            plans: new Set(),
-            totalPremium: 0,
-          };
-          carrierMap.set(carrier, entry);
-        }
-
-        // Use premium from the BenefitPlan record (computed correctly during import)
-        if (bp.premium != null) {
-          entry.totalPremium += bp.premium;
-        }
-
-        // Count this as a distinct plan
-        const planLabel = `${carrier}::${bp.planName || bp.planType || bp.id}`;
-        entry.plans.add(planLabel);
-
-        // Track company
-        entry.companies.add(client.id);
-      }
-
-      // ---- Step 3: Count unique employees per carrier from enrollments ----
+      // ---- Step 4: Process each active employee's enrollments ----
       for (const emp of snapshot.employees) {
         const status = (emp.status || "Active").toLowerCase();
         if (status !== "active") continue;
@@ -139,16 +132,15 @@ export async function GET() {
         }
 
         const enrollments = findEnrollmentsFromMeta(meta);
-        // Track which carriers this employee is enrolled in (deduplicate per employee)
-        const employeeCarriers = new Set<string>();
+        // Unique key for this employee (scoped to client to avoid collisions)
+        const empKey = `${snapshot.clientId}::${emp.employeeId}`;
+
+        // Track per-carrier deduplication within this employee
+        const eligibleCarriers = new Set<string>();
+        const enrolledCarriers = new Set<string>();
 
         for (const enrollment of enrollments) {
-          if (enrollment.DeclineReason || enrollment.declineReason) continue;
-
-          const endDate =
-            enrollment.CoverageEndDate || enrollment.EndDate || enrollment.EndedOn;
-          if (endDate && new Date(String(endDate)) <= new Date()) continue;
-
+          // Resolve which carrier this enrollment belongs to
           const planKey = String(
             enrollment.PlanIdentifier ||
               enrollment.PlanId ||
@@ -162,47 +154,67 @@ export async function GET() {
           const carrier = planKeyToCarrier.get(planKey);
           if (!carrier) continue;
 
-          employeeCarriers.add(carrier);
-        }
+          // ---- ELIGIBLE: any enrollment record = eligible for this carrier ----
+          if (!eligibleCarriers.has(carrier)) {
+            eligibleCarriers.add(carrier);
+            getOrCreateCarrier(carrier).eligibleEmployees.add(empKey);
+          }
 
-        // Add this employee (once) to each carrier they're enrolled in
-        for (const carrier of employeeCarriers) {
-          const entry = carrierMap.get(carrier);
-          if (entry) {
-            // Use a unique key: clientId + employeeId to avoid cross-company collisions
-            entry.enrolledEmployees.add(`${client.id}::${emp.employeeId}`);
-            companiesWithData.add(client.id);
+          // ---- ENROLLED: not declined AND coverage not ended ----
+          const declineReason =
+            enrollment.DeclineReason || enrollment.declineReason;
+          if (declineReason) continue;
+
+          const endDate =
+            enrollment.CoverageEndDate || enrollment.EndDate || enrollment.EndedOn;
+          if (endDate && new Date(String(endDate)) <= new Date()) continue;
+
+          // This is an active enrollment
+          if (!enrolledCarriers.has(carrier)) {
+            enrolledCarriers.add(carrier);
+            getOrCreateCarrier(carrier).enrolledEmployees.add(empKey);
+          }
+
+          // ---- PREMIUM: PlanCost = total monthly premium as billed by carrier ----
+          const planCost = parseFloat(
+            String(
+              enrollment.PlanCost ||
+                enrollment.MonthlyPlanCost ||
+                enrollment.TotalPremium ||
+                enrollment.Premium ||
+                enrollment.MonthlyPremium ||
+                enrollment.TotalMonthlyPremium ||
+                "0"
+            )
+          );
+
+          if (!isNaN(planCost) && planCost > 0) {
+            getOrCreateCarrier(carrier).monthlyPremium += planCost;
           }
         }
       }
     }
 
-    // Convert to array — only include carriers with enrolled employees
+    // ---- Step 5: Build response ----
     const rows = Array.from(carrierMap.values())
-      .filter((entry) => entry.enrolledEmployees.size > 0)
+      .filter((entry) => entry.eligibleEmployees.size > 0)
       .map((entry) => ({
         carrier: entry.carrier,
+        eligible: entry.eligibleEmployees.size,
         enrolled: entry.enrolledEmployees.size,
-        companies: entry.companies.size,
-        plans: entry.plans.size,
-        totalPremium: Math.round(entry.totalPremium * 100) / 100,
+        monthlyPremium: Math.round(entry.monthlyPremium * 100) / 100,
       }))
       .sort((a, b) => a.carrier.localeCompare(b.carrier));
 
     const totals = {
+      eligible: rows.reduce((sum, r) => sum + r.eligible, 0),
       enrolled: rows.reduce((sum, r) => sum + r.enrolled, 0),
-      companies: companiesWithData.size,
-      plans: rows.reduce((sum, r) => sum + r.plans, 0),
-      totalPremium:
-        Math.round(
-          rows.reduce((sum, r) => sum + r.totalPremium, 0) * 100
-        ) / 100,
+      monthlyPremium:
+        Math.round(rows.reduce((sum, r) => sum + r.monthlyPremium, 0) * 100) /
+        100,
     };
 
-    const dataPeriod =
-      latestYear > 0
-        ? `${latestYear}-${String(latestMonth).padStart(2, "0")}`
-        : null;
+    const dataPeriod = `${latestYear}-${String(latestMonth).padStart(2, "0")}`;
 
     return NextResponse.json({
       rows,

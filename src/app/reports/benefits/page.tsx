@@ -5,17 +5,15 @@ import { ArrowLeft, Search, Download, Printer, ArrowUpDown, ArrowUp, ArrowDown, 
 
 interface CarrierRow {
   carrier: string;
+  eligible: number;
   enrolled: number;
-  companies: number;
-  plans: number;
-  totalPremium: number;
+  monthlyPremium: number;
 }
 
 interface Totals {
+  eligible: number;
   enrolled: number;
-  companies: number;
-  plans: number;
-  totalPremium: number;
+  monthlyPremium: number;
 }
 
 type SortKey = keyof CarrierRow;
@@ -26,13 +24,13 @@ function formatCurrency(val: number): string {
 }
 
 function toCSV(rows: CarrierRow[], totals: Totals): string {
-  const header = "Carrier,Enrolled Employees,Companies,Plans,Total Premium";
+  const header = "Carrier,Eligible Employees,Enrolled Employees,Monthly Premium";
   const lines = rows.map(
     (r) =>
-      `"${r.carrier}",${r.enrolled},${r.companies},${r.plans},${r.totalPremium.toFixed(2)}`
+      `"${r.carrier}",${r.eligible},${r.enrolled},${r.monthlyPremium.toFixed(2)}`
   );
   lines.push(
-    `"-- Total --",${totals.enrolled},${totals.companies},${totals.plans},${totals.totalPremium.toFixed(2)}`
+    `"-- Total --",${totals.eligible},${totals.enrolled},${totals.monthlyPremium.toFixed(2)}`
   );
   return [header, ...lines].join("\n");
 }
@@ -49,7 +47,7 @@ function downloadFile(content: string, filename: string, mimeType: string) {
 
 function toExcelXML(rows: CarrierRow[], totals: Totals): string {
   const escXml = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-  const headers = ["Carrier", "Enrolled Employees", "Companies", "Plans", "Total Premium"];
+  const headers = ["Carrier", "Eligible Employees", "Enrolled Employees", "Monthly Premium"];
 
   let xml = `<?xml version="1.0"?><?mso-application progid="Excel.Sheet"?>
 <Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet"
@@ -71,19 +69,17 @@ function toExcelXML(rows: CarrierRow[], totals: Totals): string {
   for (const r of rows) {
     xml += "<Row>";
     xml += `<Cell><Data ss:Type="String">${escXml(r.carrier)}</Data></Cell>`;
+    xml += `<Cell><Data ss:Type="Number">${r.eligible}</Data></Cell>`;
     xml += `<Cell><Data ss:Type="Number">${r.enrolled}</Data></Cell>`;
-    xml += `<Cell><Data ss:Type="Number">${r.companies}</Data></Cell>`;
-    xml += `<Cell><Data ss:Type="Number">${r.plans}</Data></Cell>`;
-    xml += `<Cell ss:StyleID="Currency"><Data ss:Type="Number">${r.totalPremium}</Data></Cell>`;
+    xml += `<Cell ss:StyleID="Currency"><Data ss:Type="Number">${r.monthlyPremium}</Data></Cell>`;
     xml += "</Row>";
   }
 
   xml += "<Row>";
   xml += `<Cell ss:StyleID="Bold"><Data ss:Type="String">-- Total --</Data></Cell>`;
+  xml += `<Cell ss:StyleID="Bold"><Data ss:Type="Number">${totals.eligible}</Data></Cell>`;
   xml += `<Cell ss:StyleID="Bold"><Data ss:Type="Number">${totals.enrolled}</Data></Cell>`;
-  xml += `<Cell ss:StyleID="Bold"><Data ss:Type="Number">${totals.companies}</Data></Cell>`;
-  xml += `<Cell ss:StyleID="Bold"><Data ss:Type="Number">${totals.plans}</Data></Cell>`;
-  xml += `<Cell ss:StyleID="BoldCurrency"><Data ss:Type="Number">${totals.totalPremium}</Data></Cell>`;
+  xml += `<Cell ss:StyleID="BoldCurrency"><Data ss:Type="Number">${totals.monthlyPremium}</Data></Cell>`;
   xml += "</Row>";
 
   xml += "</Table></Worksheet></Workbook>";
@@ -127,20 +123,18 @@ export default function BenefitsReportPage() {
     return sortDir === "asc" ? diff : -diff;
   });
 
-  // When no search filter is active, use the API's pre-computed totals
-  // (which correctly deduplicate companies). When filtering, recalculate from visible rows.
+  // Use API totals when unfiltered (correctly deduplicated); recalculate when searching
   const isFiltered = search.length > 0;
   const displayTotals = isFiltered
     ? filtered.reduce(
         (acc, r) => ({
+          eligible: acc.eligible + r.eligible,
           enrolled: acc.enrolled + r.enrolled,
-          companies: acc.companies + r.companies,
-          plans: acc.plans + r.plans,
-          totalPremium: acc.totalPremium + r.totalPremium,
+          monthlyPremium: acc.monthlyPremium + r.monthlyPremium,
         }),
-        { enrolled: 0, companies: 0, plans: 0, totalPremium: 0 }
+        { eligible: 0, enrolled: 0, monthlyPremium: 0 }
       )
-    : totals || { enrolled: 0, companies: 0, plans: 0, totalPremium: 0 };
+    : totals || { eligible: 0, enrolled: 0, monthlyPremium: 0 };
 
   function handleSort(key: SortKey) {
     if (sortKey === key) {
@@ -184,7 +178,7 @@ export default function BenefitsReportPage() {
   tr:last-child { font-weight: bold; }
   .text-right { text-align: right; }
 </style></head><body>
-<h1>Benefits Report</h1>
+<h1>Benefits Report — ${dataPeriod || ""}</h1>
 ${tableHTML}
 </body></html>`);
     printWindow.document.close();
@@ -200,18 +194,18 @@ ${tableHTML}
       <div className="mb-8">
         <h1 className="text-3xl font-bold tracking-tight text-bob-text">Benefits Report</h1>
         <p className="text-bob-text-soft mt-1">
-          Carrier-level summary of actively enrolled employees and premiums
+          Carrier-level summary from the most recent data upload
         </p>
       </div>
 
-      {/* Verified banner */}
+      {/* Data period banner */}
       {dataPeriod && (
         <div className="flex items-center gap-3 bg-bob-green-light/50 border border-bob-green/20 rounded-2xl px-5 py-3.5 mb-6">
           <div className="w-8 h-8 rounded-xl bg-white flex items-center justify-center flex-shrink-0">
             <CheckCircle className="w-4 h-4 text-bob-green" />
           </div>
           <span className="text-sm text-emerald-800">
-            <span className="font-semibold">Verified</span> — Data period: {dataPeriod}. Showing active enrolled employees only. Exclusion rules applied.
+            <span className="font-semibold">Data period: {dataPeriod}</span> — Active employees only. Premium sourced from PlanCost. Exclusion rules applied.
           </span>
         </div>
       )}
@@ -258,10 +252,9 @@ ${tableHTML}
               <tr>
                 {([
                   { key: "carrier" as SortKey, label: "Carrier", align: "text-left" },
+                  { key: "eligible" as SortKey, label: "Eligible Employees", align: "text-right" },
                   { key: "enrolled" as SortKey, label: "Enrolled Employees", align: "text-right" },
-                  { key: "companies" as SortKey, label: "Companies", align: "text-right" },
-                  { key: "plans" as SortKey, label: "Plans", align: "text-right" },
-                  { key: "totalPremium" as SortKey, label: "Total Premium", align: "text-right" },
+                  { key: "monthlyPremium" as SortKey, label: "Monthly Premium", align: "text-right" },
                 ]).map((col) => (
                   <th
                     key={col.key}
@@ -277,19 +270,17 @@ ${tableHTML}
               {sorted.map((row) => (
                 <tr key={row.carrier} className="hover:bg-bob-bg/50 transition-colors duration-150">
                   <td className="px-6 py-4 font-semibold text-bob-purple">{row.carrier}</td>
+                  <td className="px-6 py-4 text-right font-medium">{row.eligible.toLocaleString()}</td>
                   <td className="px-6 py-4 text-right font-medium">{row.enrolled.toLocaleString()}</td>
-                  <td className="px-6 py-4 text-right font-medium">{row.companies.toLocaleString()}</td>
-                  <td className="px-6 py-4 text-right font-medium">{row.plans.toLocaleString()}</td>
-                  <td className="px-6 py-4 text-right font-semibold">{formatCurrency(row.totalPremium)}</td>
+                  <td className="px-6 py-4 text-right font-semibold">{formatCurrency(row.monthlyPremium)}</td>
                 </tr>
               ))}
               {/* Totals row */}
               <tr className="bg-bob-bg font-bold">
                 <td className="px-6 py-4 text-bob-text">Total</td>
+                <td className="px-6 py-4 text-right">{displayTotals.eligible.toLocaleString()}</td>
                 <td className="px-6 py-4 text-right">{displayTotals.enrolled.toLocaleString()}</td>
-                <td className="px-6 py-4 text-right">{displayTotals.companies.toLocaleString()}</td>
-                <td className="px-6 py-4 text-right">{displayTotals.plans.toLocaleString()}</td>
-                <td className="px-6 py-4 text-right">{formatCurrency(displayTotals.totalPremium)}</td>
+                <td className="px-6 py-4 text-right">{formatCurrency(displayTotals.monthlyPremium)}</td>
               </tr>
             </tbody>
           </table>
