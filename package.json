@@ -3,8 +3,8 @@
   "version": "1.0.0",
   "scripts": {
     "dev": "next dev",
-    "build": "prisma generate && prisma db push --skip-generate && next build",
-    "start": "next start -H 0.0.0.0 -p ${PORT:-3000}",
+    "build": "prisma generate && next build",
+    "start": "prisma db push --skip-generate && next start -H 0.0.0.0 -p ${PORT:-3000}",
     "postinstall": "prisma generate"
   },
   "engines": {
