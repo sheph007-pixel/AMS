@@ -117,7 +117,7 @@ export default function ImportPage() {
               <dd>{String(result.employeesProcessed)}</dd>
             </div>
           </dl>
-          {result.clientsProcessed === 0 && result.debugStructure && (
+          {Number(result.clientsProcessed) === 0 && result.debugStructure && (
             <div className="mt-3 pt-3 border-t border-green-200">
               <p className="text-xs font-medium text-green-800 mb-1">Debug: Parsed XML structure</p>
               <pre className="text-xs text-green-700 bg-green-100 rounded p-2 overflow-auto max-h-64 whitespace-pre-wrap">
