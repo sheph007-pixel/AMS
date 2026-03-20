@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
 import { deriveLifecycleStatus } from "@/lib/lifecycle";
+import { getExclusionRules, filterBenefitPlans } from "@/lib/exclusions";
 
 export async function GET(
   _request: NextRequest,
@@ -24,6 +25,12 @@ export async function GET(
 
     if (!client) {
       return NextResponse.json({ error: "Client not found" }, { status: 404 });
+    }
+
+    // Apply exclusion rules to filter out excluded benefit plans
+    const exclusionRules = await getExclusionRules();
+    for (const snapshot of client.snapshots) {
+      snapshot.benefitPlans = filterBenefitPlans(snapshot.benefitPlans, exclusionRules);
     }
 
     const allYearsResult = await prisma.clientSnapshot.findMany({

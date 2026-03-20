@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
 import { deriveLifecycleStatus } from "@/lib/lifecycle";
+import { getExclusionRules, isExcluded } from "@/lib/exclusions";
 
 export async function GET() {
   try {
@@ -22,7 +23,13 @@ export async function GET() {
     });
     const allSystemYears = allYearsResult.map((r) => r.year);
 
-    const enriched = clients.map((client) => {
+    // Apply exclusion rules — filter out clients matching groupName rules
+    const exclusionRules = await getExclusionRules();
+    const filteredClients = clients.filter(
+      (client) => !isExcluded({ groupName: client.groupName }, exclusionRules)
+    );
+
+    const enriched = filteredClients.map((client) => {
       const years = client.snapshots.map((s) => s.year);
       const status = deriveLifecycleStatus(years, allSystemYears);
       const firstYear = years.length > 0 ? Math.min(...years) : null;
