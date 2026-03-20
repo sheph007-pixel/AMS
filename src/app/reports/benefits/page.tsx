@@ -3,7 +3,7 @@
 import { useEffect, useState, useRef } from "react";
 import {
   ArrowLeft, Search, Download, Printer, ArrowUpDown, ArrowUp, ArrowDown,
-  CheckCircle, ChevronDown, ChevronRight, AlertTriangle, Info,
+  CheckCircle, ChevronDown, ChevronRight, Info,
 } from "lucide-react";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -91,6 +91,90 @@ function downloadFile(content: string, filename: string, mimeType: string) {
   a.download = filename;
   a.click();
   URL.revokeObjectURL(url);
+}
+
+interface CensusRow {
+  groupName: string;
+  employeeName: string;
+  carrier: string;
+  planName: string;
+  planType: string;
+  coverageTier: string;
+  planCost: number;
+}
+
+function censusToExcelXML(rows: CensusRow[], carrier: string): string {
+  const escXml = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+  // ── Sheet 1: Group Summary (adds up to carrier total) ──
+  // Aggregate by group: distinct enrolled employees + sum of PlanCost
+  const groupMap = new Map<string, { enrolled: Set<string>; premium: number }>();
+  for (const r of rows) {
+    let g = groupMap.get(r.groupName);
+    if (!g) { g = { enrolled: new Set(), premium: 0 }; groupMap.set(r.groupName, g); }
+    g.enrolled.add(r.employeeName);
+    g.premium += r.planCost;
+  }
+  const groupRows = Array.from(groupMap.entries())
+    .map(([name, data]) => ({ groupName: name, enrolled: data.enrolled.size, premium: Math.round(data.premium * 100) / 100 }))
+    .sort((a, b) => b.premium - a.premium);
+
+  const totalEnrolled = groupRows.reduce((s, r) => s + r.enrolled, 0);
+  const totalPremium = groupRows.reduce((s, r) => s + r.premium, 0);
+
+  let xml = `<?xml version="1.0"?><?mso-application progid="Excel.Sheet"?>
+<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet"
+ xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet">
+<Styles>
+ <Style ss:ID="Bold"><Font ss:Bold="1"/></Style>
+ <Style ss:ID="Currency"><NumberFormat ss:Format="$#,##0.00"/></Style>
+ <Style ss:ID="BoldCurrency"><Font ss:Bold="1"/><NumberFormat ss:Format="$#,##0.00"/></Style>
+</Styles>`;
+
+  // Sheet 1: Group Summary
+  xml += `<Worksheet ss:Name="${escXml(carrier)} - Group Summary">
+<Table>`;
+  xml += `<Row><Cell ss:StyleID="Bold"><Data ss:Type="String">Group Name</Data></Cell><Cell ss:StyleID="Bold"><Data ss:Type="String"># Enrolled</Data></Cell><Cell ss:StyleID="Bold"><Data ss:Type="String">Total Premium</Data></Cell></Row>`;
+  for (const r of groupRows) {
+    xml += "<Row>";
+    xml += `<Cell><Data ss:Type="String">${escXml(r.groupName)}</Data></Cell>`;
+    xml += `<Cell><Data ss:Type="Number">${r.enrolled}</Data></Cell>`;
+    xml += `<Cell ss:StyleID="Currency"><Data ss:Type="Number">${r.premium}</Data></Cell>`;
+    xml += "</Row>";
+  }
+  xml += "<Row>";
+  xml += `<Cell ss:StyleID="Bold"><Data ss:Type="String">TOTAL</Data></Cell>`;
+  xml += `<Cell ss:StyleID="Bold"><Data ss:Type="Number">${totalEnrolled}</Data></Cell>`;
+  xml += `<Cell ss:StyleID="BoldCurrency"><Data ss:Type="Number">${totalPremium}</Data></Cell>`;
+  xml += "</Row>";
+  xml += "</Table></Worksheet>";
+
+  // Sheet 2: Employee Detail
+  xml += `<Worksheet ss:Name="${escXml(carrier)} - Employee Detail">
+<Table>`;
+  const detailHeaders = ["Group Name", "Employee", "Plan Name", "Plan Type", "Coverage Tier", "Monthly Premium"];
+  xml += "<Row>";
+  detailHeaders.forEach((h) => { xml += `<Cell ss:StyleID="Bold"><Data ss:Type="String">${escXml(h)}</Data></Cell>`; });
+  xml += "</Row>";
+  for (const r of rows) {
+    xml += "<Row>";
+    xml += `<Cell><Data ss:Type="String">${escXml(r.groupName)}</Data></Cell>`;
+    xml += `<Cell><Data ss:Type="String">${escXml(r.employeeName)}</Data></Cell>`;
+    xml += `<Cell><Data ss:Type="String">${escXml(r.planName)}</Data></Cell>`;
+    xml += `<Cell><Data ss:Type="String">${escXml(r.planType)}</Data></Cell>`;
+    xml += `<Cell><Data ss:Type="String">${escXml(r.coverageTier)}</Data></Cell>`;
+    xml += `<Cell ss:StyleID="Currency"><Data ss:Type="Number">${r.planCost}</Data></Cell>`;
+    xml += "</Row>";
+  }
+  xml += "<Row>";
+  xml += `<Cell ss:StyleID="Bold"><Data ss:Type="String">TOTAL</Data></Cell>`;
+  xml += `<Cell><Data ss:Type="String"></Data></Cell><Cell><Data ss:Type="String"></Data></Cell><Cell><Data ss:Type="String"></Data></Cell><Cell><Data ss:Type="String"></Data></Cell>`;
+  xml += `<Cell ss:StyleID="BoldCurrency"><Data ss:Type="Number">${totalPremium}</Data></Cell>`;
+  xml += "</Row>";
+  xml += "</Table></Worksheet>";
+
+  xml += "</Workbook>";
+  return xml;
 }
 
 function toExcelXML(rows: CarrierRow[], totals: Totals): string {
@@ -189,6 +273,7 @@ export default function BenefitsReportPage() {
   const [loading, setLoading] = useState(true);
   const [sortKey, setSortKey] = useState<SortKey>("monthlyPremium");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
+  const [downloadingCarrier, setDownloadingCarrier] = useState<string | null>(null);
   const tableRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -229,6 +314,22 @@ export default function BenefitsReportPage() {
         { eligible: 0, enrolled: 0, monthlyPremium: 0 }
       )
     : totals || { eligible: 0, enrolled: 0, monthlyPremium: 0 };
+
+  async function handleCarrierClick(carrier: string) {
+    setDownloadingCarrier(carrier);
+    try {
+      const res = await fetch(`/api/reports/benefits/census?carrier=${encodeURIComponent(carrier)}`);
+      const data = await res.json();
+      const censusRows: CensusRow[] = data.rows || [];
+      const xml = censusToExcelXML(censusRows, carrier);
+      const safeName = carrier.replace(/[^a-zA-Z0-9]/g, "_");
+      downloadFile(xml, `${safeName}_census.xls`, "application/vnd.ms-excel");
+    } catch (err) {
+      console.error("Census download error:", err);
+    } finally {
+      setDownloadingCarrier(null);
+    }
+  }
 
   function handleSort(key: SortKey) {
     if (sortKey === key) {
@@ -275,12 +376,6 @@ ${tableHTML}
     printWindow.print();
   }
 
-  // Check if there are any exceptions worth flagging
-  const hasExceptions = reconciliation && (
-    reconciliation.exceptions.unmatchedPlanIdentifier > 0 ||
-    reconciliation.exceptions.blankOrInvalidPlanCost > 0
-  );
-
   return (
     <div>
       <a href="/reports" className="inline-flex items-center gap-1.5 text-sm text-bob-text-soft hover:text-bob-purple transition-colors duration-200 mb-4">
@@ -308,29 +403,6 @@ ${tableHTML}
                 Premium from PlanCost. Exclusion rules applied.
               </span>
             )}
-          </div>
-        </div>
-      )}
-
-      {/* Exception warning */}
-      {hasExceptions && reconciliation && (
-        <div className="flex items-start gap-3 bg-amber-50 border border-amber-200 rounded-2xl px-5 py-3.5 mb-4">
-          <div className="w-8 h-8 rounded-xl bg-white flex items-center justify-center flex-shrink-0 mt-0.5">
-            <AlertTriangle className="w-4 h-4 text-amber-600" />
-          </div>
-          <div className="text-sm text-amber-800">
-            <span className="font-semibold">Data quality flags</span>
-            <ul className="mt-1 space-y-0.5 text-xs">
-              {reconciliation.exceptions.unmatchedPlanIdentifier > 0 && (
-                <li>{reconciliation.exceptions.unmatchedPlanIdentifier} enrollment(s) with PlanIdentifier that did not match any plan</li>
-              )}
-              {reconciliation.exceptions.blankOrInvalidPlanCost > 0 && (
-                <li>{reconciliation.exceptions.blankOrInvalidPlanCost} enrollment(s) with blank or invalid PlanCost (treated as $0)</li>
-              )}
-              {reconciliation.exceptions.fallbackPlanNameMatch > 0 && (
-                <li>{reconciliation.exceptions.fallbackPlanNameMatch} enrollment(s) matched by plan name instead of PlanIdentifier</li>
-              )}
-            </ul>
           </div>
         </div>
       )}
@@ -395,7 +467,16 @@ ${tableHTML}
               <tbody className="divide-y divide-bob-border-light">
                 {sorted.map((row) => (
                   <tr key={row.carrier} className="hover:bg-bob-bg/50 transition-colors duration-150">
-                    <td className="px-6 py-4 font-semibold text-bob-purple">{row.carrier}</td>
+                    <td className="px-6 py-4 font-semibold">
+                      <button
+                        onClick={() => handleCarrierClick(row.carrier)}
+                        disabled={downloadingCarrier === row.carrier}
+                        className="text-bob-purple hover:underline hover:text-bob-purple/80 transition-colors cursor-pointer disabled:opacity-50"
+                        title={`Download ${row.carrier} census detail`}
+                      >
+                        {downloadingCarrier === row.carrier ? "Downloading..." : row.carrier}
+                      </button>
+                    </td>
                     <td className="px-6 py-4 text-right font-medium">{row.eligible.toLocaleString()}</td>
                     <td className="px-6 py-4 text-right font-medium">{row.enrolled.toLocaleString()}</td>
                     <td className="px-6 py-4 text-right font-semibold">{formatCurrency(row.monthlyPremium)}</td>
