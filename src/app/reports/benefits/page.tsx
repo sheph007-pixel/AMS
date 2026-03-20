@@ -93,8 +93,8 @@ export default function BenefitsReportPage() {
   const [dataPeriod, setDataPeriod] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [loading, setLoading] = useState(true);
-  const [sortKey, setSortKey] = useState<SortKey>("carrier");
-  const [sortDir, setSortDir] = useState<SortDir>("asc");
+  const [sortKey, setSortKey] = useState<SortKey>("monthlyPremium");
+  const [sortDir, setSortDir] = useState<SortDir>("desc");
   const tableRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {

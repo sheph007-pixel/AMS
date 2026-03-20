@@ -5,23 +5,26 @@ import { getExclusionRules, isExcluded } from "@/lib/exclusions";
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 /**
- * Benefits Report — uses the latest data period across all snapshots.
+ * Benefits Report — carrier-level summary from the latest data period.
  *
- * Logic:
- * 1. Find the latest period (max year+month) across all snapshots
- * 2. Only include snapshots from that exact period
- * 3. Build carrier lookup from BenefitPlan records
- * 4. For each active employee, scan enrollments from metadata:
- *    - Eligible: has any enrollment record for a carrier (even if declined)
- *    - Enrolled: has an active enrollment (not declined, coverage not ended)
- *    - Monthly Premium: sum of PlanCost from active enrollments
- * 5. All counts are unique employees per carrier (deduplicated)
+ * RULES (matching the standalone validate-xml.ts script):
+ *
+ * 1. Uses only the latest data period (max year+month) across all snapshots
+ * 2. Carrier resolved via: Enrollment.PlanIdentifier → Plan.PlanIdentifier → Plan.Carrier
+ * 3. Enrolled = distinct active employees per carrier with EnrollmentType = "Current"
+ *    - Do NOT exclude rows just because EndDate is populated
+ * 4. Eligible = distinct active employees per carrier, company-specific:
+ *    - Employee is eligible for a carrier if their company has at least one plan with that carrier
+ * 5. Monthly Premium = sum of PlanCost from ALL qualifying enrollment rows (row-level, not deduped)
+ *    - PlanCost = total monthly premium as billed by carrier (employee + dependents)
+ * 6. All counts deduplicated by employee key (scoped per client to avoid collisions)
  */
 export async function GET() {
   try {
     const exclusionRules = await getExclusionRules();
 
-    // ---- Step 1: Find the latest data period ----
+    // ── Step 1: Find the latest data period ──────────────────────────────
+
     const latestSnapshot = await prisma.clientSnapshot.findFirst({
       orderBy: [{ year: "desc" }, { month: "desc" }],
       select: { year: true, month: true },
@@ -38,7 +41,8 @@ export async function GET() {
 
     const { year: latestYear, month: latestMonth } = latestSnapshot;
 
-    // ---- Step 2: Load all snapshots from the latest period ----
+    // ── Step 2: Load all snapshots from the latest period ────────────────
+
     const snapshots = await prisma.clientSnapshot.findMany({
       where: { year: latestYear, month: latestMonth },
       include: {
@@ -50,6 +54,7 @@ export async function GET() {
 
     let latestImportDate: Date | null = null;
 
+    // Carrier → aggregated data
     const carrierMap = new Map<
       string,
       {
@@ -59,6 +64,12 @@ export async function GET() {
         monthlyPremium: number;
       }
     >();
+
+    // Carrier → Set of companyIdentifiers that have plans with this carrier
+    const carrierCompanies = new Map<string, Set<string>>();
+
+    // CompanyIdentifier → Set of active employee keys
+    const companyActiveEmployees = new Map<string, Set<string>>();
 
     function getOrCreateCarrier(carrier: string) {
       let entry = carrierMap.get(carrier);
@@ -80,13 +91,14 @@ export async function GET() {
         continue;
       }
 
-      // Track latest import date
       if (!latestImportDate || snapshot.importedAt > latestImportDate) {
         latestImportDate = snapshot.importedAt;
       }
 
-      // ---- Step 3: Build plan lookup for this snapshot ----
-      // Maps PlanIdentifier (or PlanName) → carrier name
+      const clientKey = snapshot.clientId;
+
+      // ── Step 3: Build plan lookup for this snapshot ──────────────────
+      // PlanIdentifier (or PlanName) → carrier
       const planKeyToCarrier = new Map<string, string>();
 
       for (const bp of snapshot.benefitPlans) {
@@ -108,20 +120,32 @@ export async function GET() {
             const planId = meta.PlanIdentifier || meta.planIdentifier;
             if (planId) planKeyToCarrier.set(String(planId), carrier);
           } catch {
-            /* ignore parse errors */
+            /* ignore */
           }
         }
-
         // Register by PlanName
         if (bp.planName) planKeyToCarrier.set(bp.planName, carrier);
+
+        // Track carrier → company mapping for eligibility
+        if (!carrierCompanies.has(carrier)) carrierCompanies.set(carrier, new Set());
+        carrierCompanies.get(carrier)!.add(clientKey);
       }
 
       if (planKeyToCarrier.size === 0) continue;
 
-      // ---- Step 4: Process each active employee's enrollments ----
+      // Initialize active employee set for this company
+      if (!companyActiveEmployees.has(clientKey)) {
+        companyActiveEmployees.set(clientKey, new Set());
+      }
+
+      // ── Step 4: Process each active employee's enrollments ──────────
+
       for (const emp of snapshot.employees) {
         const status = (emp.status || "Active").toLowerCase();
         if (status !== "active") continue;
+
+        const empKey = `${clientKey}::${emp.employeeId}`;
+        companyActiveEmployees.get(clientKey)!.add(empKey);
 
         if (!emp.metadata) continue;
         let meta: any;
@@ -132,15 +156,31 @@ export async function GET() {
         }
 
         const enrollments = findEnrollmentsFromMeta(meta);
-        // Unique key for this employee (scoped to client to avoid collisions)
-        const empKey = `${snapshot.clientId}::${emp.employeeId}`;
-
-        // Track per-carrier deduplication within this employee
-        const eligibleCarriers = new Set<string>();
-        const enrolledCarriers = new Set<string>();
+        const enrolledCarriersThisEmp = new Set<string>();
 
         for (const enrollment of enrollments) {
-          // Resolve which carrier this enrollment belongs to
+          // ── Filter: EnrollmentType must be "Current" ──
+          const enrollmentType =
+            enrollment.EnrollmentType || enrollment.enrollmentType || enrollment.Type;
+          const isCurrent =
+            enrollmentType && String(enrollmentType).toLowerCase() === "current";
+
+          // Fallback: if EnrollmentType not present, use old decline/end logic
+          let isQualifying = false;
+          if (enrollmentType) {
+            isQualifying = !!isCurrent;
+          } else {
+            const declineReason =
+              enrollment.DeclineReason || enrollment.declineReason;
+            const endDate =
+              enrollment.CoverageEndDate || enrollment.EndDate || enrollment.EndedOn;
+            const isEnded = endDate && new Date(String(endDate)) <= new Date();
+            isQualifying = !declineReason && !isEnded;
+          }
+
+          if (!isQualifying) continue;
+
+          // ── Resolve carrier via PlanIdentifier ──
           const planKey = String(
             enrollment.PlanIdentifier ||
               enrollment.PlanId ||
@@ -154,48 +194,48 @@ export async function GET() {
           const carrier = planKeyToCarrier.get(planKey);
           if (!carrier) continue;
 
-          // ---- ELIGIBLE: any enrollment record = eligible for this carrier ----
-          if (!eligibleCarriers.has(carrier)) {
-            eligibleCarriers.add(carrier);
-            getOrCreateCarrier(carrier).eligibleEmployees.add(empKey);
-          }
-
-          // ---- ENROLLED: not declined AND coverage not ended ----
-          const declineReason =
-            enrollment.DeclineReason || enrollment.declineReason;
-          if (declineReason) continue;
-
-          const endDate =
-            enrollment.CoverageEndDate || enrollment.EndDate || enrollment.EndedOn;
-          if (endDate && new Date(String(endDate)) <= new Date()) continue;
-
-          // This is an active enrollment
-          if (!enrolledCarriers.has(carrier)) {
-            enrolledCarriers.add(carrier);
+          // ── Enrolled: distinct employee per carrier ──
+          if (!enrolledCarriersThisEmp.has(carrier)) {
+            enrolledCarriersThisEmp.add(carrier);
             getOrCreateCarrier(carrier).enrolledEmployees.add(empKey);
           }
 
-          // ---- PREMIUM: PlanCost = total monthly premium as billed by carrier ----
-          const planCost = parseFloat(
-            String(
-              enrollment.PlanCost ||
-                enrollment.MonthlyPlanCost ||
-                enrollment.TotalPremium ||
-                enrollment.Premium ||
-                enrollment.MonthlyPremium ||
-                enrollment.TotalMonthlyPremium ||
-                "0"
-            )
+          // ── Premium: PlanCost at enrollment-row level (not deduped) ──
+          const rawCost = String(
+            enrollment.PlanCost ||
+              enrollment.MonthlyPlanCost ||
+              enrollment.TotalPremium ||
+              enrollment.Premium ||
+              enrollment.MonthlyPremium ||
+              enrollment.TotalMonthlyPremium ||
+              "0"
           );
-
-          if (!isNaN(planCost) && planCost > 0) {
-            getOrCreateCarrier(carrier).monthlyPremium += planCost;
+          const cost = parseFloat(rawCost);
+          if (!isNaN(cost) && cost > 0) {
+            getOrCreateCarrier(carrier).monthlyPremium += cost;
           }
         }
       }
     }
 
-    // ---- Step 5: Build response ----
+    // ── Step 5: Compute carrier-specific eligibility ─────────────────────
+    // An active employee is eligible for a carrier if their company has
+    // at least one plan with that carrier.
+
+    for (const [carrier, companyIds] of carrierCompanies) {
+      const entry = getOrCreateCarrier(carrier);
+      for (const companyId of companyIds) {
+        const activeSet = companyActiveEmployees.get(companyId);
+        if (activeSet) {
+          for (const empKey of activeSet) {
+            entry.eligibleEmployees.add(empKey);
+          }
+        }
+      }
+    }
+
+    // ── Step 6: Build response ───────────────────────────────────────────
+
     const rows = Array.from(carrierMap.values())
       .filter((entry) => entry.eligibleEmployees.size > 0)
       .map((entry) => ({
@@ -204,7 +244,7 @@ export async function GET() {
         enrolled: entry.enrolledEmployees.size,
         monthlyPremium: Math.round(entry.monthlyPremium * 100) / 100,
       }))
-      .sort((a, b) => a.carrier.localeCompare(b.carrier));
+      .sort((a, b) => b.monthlyPremium - a.monthlyPremium);
 
     const totals = {
       eligible: rows.reduce((sum, r) => sum + r.eligible, 0),

@@ -473,10 +473,15 @@ function isExcluded(
 }
 
 /**
- * Count active enrolled employees and sum MonthlyPlanCost per plan from enrollment data.
- * Only processes employees whose status is Active (not terminated).
- * - Enrolled: active employee has an active enrollment (no DeclineReason, no ended coverage)
- * - Premium: sum of MonthlyPlanCost from each active enrollment
+ * Count active enrolled employees and sum PlanCost per plan from enrollment data.
+ *
+ * Rules:
+ * - Only processes employees whose EmploymentStatus = "Active"
+ * - Enrolled: active employee has an enrollment with EnrollmentType = "Current"
+ *   (Do NOT exclude rows just because EndDate is populated)
+ * - Eligible: active employee has any enrollment record for that plan (even declined)
+ * - Premium: sum of PlanCost from ALL qualifying enrollment rows (row-level, not deduped)
+ * - PlanCost = total monthly premium as billed by carrier (employee + dependents)
  */
 function countByPlan(employees: any[]): {
   enrolled: Map<string, number>;
@@ -504,25 +509,41 @@ function countByPlan(employees: any[]): {
         null;
       if (!planKey) continue;
 
-      // Every enrollment record means the employee is eligible
+      // Every enrollment record means the employee is eligible for this plan
       if (!seenEligible.has(planKey)) {
         seenEligible.add(planKey);
         eligible.set(planKey, (eligible.get(planKey) || 0) + 1);
       }
 
-      // Check if actively enrolled (not declined, not ended)
-      const declineReason = extractField(enrollment, "DeclineReason");
-      const endDate = extractField(enrollment, "CoverageEndDate", "EndDate", "EndedOn");
-      const isEnded = endDate && new Date(endDate) <= new Date();
+      // Only count "Current" enrollments for enrolled + premium
+      const enrollmentType = extractField(enrollment, "EnrollmentType", "Type");
+      const isCurrent = enrollmentType && enrollmentType.toLowerCase() === "current";
 
-      if (!declineReason && !isEnded && !seenEnrolled.has(planKey)) {
-        seenEnrolled.add(planKey);
-        enrolled.set(planKey, (enrolled.get(planKey) || 0) + 1);
+      // Fallback: if EnrollmentType is not present in the XML, use the old logic
+      // (no DeclineReason and coverage not ended)
+      let isQualifying = false;
+      if (enrollmentType) {
+        // EnrollmentType field exists — use it strictly
+        isQualifying = !!isCurrent;
+      } else {
+        // EnrollmentType not present — fall back to decline/end check
+        const declineReason = extractField(enrollment, "DeclineReason");
+        const endDate = extractField(enrollment, "CoverageEndDate", "EndDate", "EndedOn");
+        const isEnded = endDate && new Date(endDate) <= new Date();
+        isQualifying = !declineReason && !isEnded;
+      }
 
-        // Sum MonthlyPlanCost from the enrollment level
+      if (isQualifying) {
+        // Distinct enrolled employee per plan
+        if (!seenEnrolled.has(planKey)) {
+          seenEnrolled.add(planKey);
+          enrolled.set(planKey, (enrolled.get(planKey) || 0) + 1);
+        }
+
+        // Sum PlanCost at the enrollment-row level (NOT deduped per employee)
         const cost = parseFloatSafe(
-          extractField(enrollment, "MonthlyPlanCost", "PlanCost", "TotalPremium",
-            "Premium", "MonthlyPremium", "EmployeePremium", "TotalMonthlyPremium",
+          extractField(enrollment, "PlanCost", "MonthlyPlanCost", "TotalPremium",
+            "Premium", "MonthlyPremium", "TotalMonthlyPremium",
             "Cost", "Rate")
         );
         if (cost) {
