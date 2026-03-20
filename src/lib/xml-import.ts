@@ -184,8 +184,8 @@ export async function importAnnualXml(
       },
     });
 
-    // --- Count eligible and enrolled per plan from employee enrollment data ---
-    const { enrolled: enrolledByPlan, eligible: eligibleByPlan } = countByPlan(employees);
+    // --- Count active enrolled per plan + sum enrollment-level MonthlyPlanCost ---
+    const { enrolled: enrolledByPlan, eligible: eligibleByPlan, premiumByPlan } = countByPlan(employees);
 
     // --- Import benefit plans (filtered by exclusion rules) ---
     for (const plan of plans) {
@@ -197,13 +197,21 @@ export async function importAnnualXml(
       if (isExcluded({ carrier, planName, planType, groupName }, exclusionRules)) {
         continue;
       }
-      const policyNumber = extractField(plan, "PolicyNumber");
-      const groupNumber = extractField(plan, "GroupNumber");
       const planIdentifier = extractField(plan, "PlanIdentifier");
-      const monthlyCost = parseFloatSafe(
+
+      // Plan-level cost (fallback)
+      const planLevelCost = parseFloatSafe(
         extractField(plan, "MonthlyPlanCost", "PlanCost", "TotalPremium",
           "Premium", "MonthlyPremium", "Cost", "Rate")
       );
+
+      // Enrollment-level cost (summed from active employee enrollments — preferred)
+      const enrollmentCost = (planIdentifier && premiumByPlan.get(planIdentifier))
+        || (planName && premiumByPlan.get(planName))
+        || null;
+
+      // Use enrollment-level premium if available, otherwise fall back to plan-level
+      const premium = enrollmentCost ?? planLevelCost;
 
       // Match eligible/enrolled: try PlanIdentifier, then fall back to PlanName
       const enrolleeCount = (planIdentifier && enrolledByPlan.get(planIdentifier))
@@ -221,7 +229,7 @@ export async function importAnnualXml(
           planName,
           eligible: eligibleCount,
           enrollees: enrolleeCount,
-          premium: monthlyCost,
+          premium,
           metadata: JSON.stringify(collectAllFields(plan)),
         },
       });
@@ -465,18 +473,26 @@ function isExcluded(
 }
 
 /**
- * Count eligible and enrolled employees per plan from enrollment data.
- * - Enrolled: employee has an active enrollment (no EndDate or EndDate in future)
- * - Eligible: employee has any enrollment record for the plan (including declined/ended)
+ * Count active enrolled employees and sum MonthlyPlanCost per plan from enrollment data.
+ * Only processes employees whose status is Active (not terminated).
+ * - Enrolled: active employee has an active enrollment (no DeclineReason, no ended coverage)
+ * - Premium: sum of MonthlyPlanCost from each active enrollment
  */
 function countByPlan(employees: any[]): {
   enrolled: Map<string, number>;
   eligible: Map<string, number>;
+  premiumByPlan: Map<string, number>;
 } {
   const enrolled = new Map<string, number>();
   const eligible = new Map<string, number>();
+  const premiumByPlan = new Map<string, number>();
 
   for (const emp of employees) {
+    // Only count active employees
+    const termDate = extractField(emp, "TerminationDate", "TerminatedOn", "TermDate");
+    const status = extractField(emp, "EmploymentStatus", "Status") || deriveStatus(termDate);
+    if (status.toLowerCase() !== "active") continue;
+
     const enrollments = findEnrollments(emp);
     const seenEnrolled = new Set<string>();
     const seenEligible = new Set<string>();
@@ -502,11 +518,21 @@ function countByPlan(employees: any[]): {
       if (!declineReason && !isEnded && !seenEnrolled.has(planKey)) {
         seenEnrolled.add(planKey);
         enrolled.set(planKey, (enrolled.get(planKey) || 0) + 1);
+
+        // Sum MonthlyPlanCost from the enrollment level
+        const cost = parseFloatSafe(
+          extractField(enrollment, "MonthlyPlanCost", "PlanCost", "TotalPremium",
+            "Premium", "MonthlyPremium", "EmployeePremium", "TotalMonthlyPremium",
+            "Cost", "Rate")
+        );
+        if (cost) {
+          premiumByPlan.set(planKey, (premiumByPlan.get(planKey) || 0) + cost);
+        }
       }
     }
   }
 
-  return { enrolled, eligible };
+  return { enrolled, eligible, premiumByPlan };
 }
 
 function extractPlanDates(plans: any[]): { effectiveDate: string | null; renewalDate: string | null } {
