@@ -2,9 +2,8 @@
 
 import { useEffect, useState, useRef } from "react";
 import {
-  Search, Users, TrendingUp, DollarSign, Download,
+  Search, Users, DollarSign, Download,
   ArrowUpDown, ArrowUp, ArrowDown, Building2,
-  CheckCircle2, XCircle,
 } from "lucide-react";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -16,10 +15,10 @@ interface ClientRow {
   state: string | null;
   status: string;
   activeEmployees: number | null;
-  hasMedical: boolean;
-  hasDental: boolean;
-  hasVision: boolean;
-  hasSupplemental: boolean;
+  medicalEnrolled: number;
+  dentalEnrolled: number;
+  visionEnrolled: number;
+  supplementalEnrolled: number;
 }
 
 interface YoYMetric {
@@ -68,16 +67,16 @@ function downloadFile(content: string, filename: string, mimeType: string) {
 }
 
 function toCSV(rows: ClientRow[]): string {
-  const header = "Group,State,Active Employees,Medical,Dental,Vision,Supplemental";
+  const header = "Group,State,# Employees,Medical,Dental,Vision,Supplemental (Guardian)";
   const lines = rows.map((r) =>
     [
       `"${r.groupName}"`,
       r.state || "",
       r.activeEmployees ?? "",
-      r.hasMedical ? "Yes" : "No",
-      r.hasDental ? "Yes" : "No",
-      r.hasVision ? "Yes" : "No",
-      r.hasSupplemental ? "Yes" : "No",
+      r.medicalEnrolled,
+      r.dentalEnrolled,
+      r.visionEnrolled,
+      r.supplementalEnrolled,
     ].join(",")
   );
   return [header, ...lines].join("\n");
@@ -154,7 +153,6 @@ export default function GroupsPage() {
   }
 
   // Derive Active Groups and # Enrolled directly from the displayed list
-  // so the cards always match the table exactly
   const activeGroupCount = activeClients.length;
   const enrolledTotal = activeClients.reduce(
     (sum, c) => sum + (c.activeEmployees ?? 0),
@@ -304,10 +302,10 @@ export default function GroupsPage() {
                     >
                       # Employees <SortIcon column="activeEmployees" />
                     </th>
-                    <th className="text-center px-4 py-3 font-semibold text-bob-text-soft text-xs whitespace-nowrap">Medical</th>
-                    <th className="text-center px-4 py-3 font-semibold text-bob-text-soft text-xs whitespace-nowrap">Dental</th>
-                    <th className="text-center px-4 py-3 font-semibold text-bob-text-soft text-xs whitespace-nowrap">Vision</th>
-                    <th className="text-center px-4 py-3 font-semibold text-bob-text-soft text-xs whitespace-nowrap">Supplemental</th>
+                    <th className="text-right px-4 py-3 font-semibold text-bob-text-soft text-xs whitespace-nowrap">Medical</th>
+                    <th className="text-right px-4 py-3 font-semibold text-bob-text-soft text-xs whitespace-nowrap">Dental</th>
+                    <th className="text-right px-4 py-3 font-semibold text-bob-text-soft text-xs whitespace-nowrap">Vision</th>
+                    <th className="text-right px-4 py-3 font-semibold text-bob-text-soft text-xs whitespace-nowrap">Supplemental (Guardian)</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-bob-border-light">
@@ -325,25 +323,17 @@ export default function GroupsPage() {
                       <td className="px-4 py-3 text-right font-medium tabular-nums">
                         {row.activeEmployees != null ? row.activeEmployees.toLocaleString() : "—"}
                       </td>
-                      <td className="px-4 py-3 text-center">
-                        {row.hasMedical
-                          ? <CheckCircle2 className="w-4 h-4 text-emerald-500 inline" />
-                          : <XCircle className="w-4 h-4 text-gray-300 inline" />}
+                      <td className="px-4 py-3 text-right tabular-nums text-bob-text-soft">
+                        {row.medicalEnrolled > 0 ? row.medicalEnrolled.toLocaleString() : "—"}
                       </td>
-                      <td className="px-4 py-3 text-center">
-                        {row.hasDental
-                          ? <CheckCircle2 className="w-4 h-4 text-emerald-500 inline" />
-                          : <XCircle className="w-4 h-4 text-gray-300 inline" />}
+                      <td className="px-4 py-3 text-right tabular-nums text-bob-text-soft">
+                        {row.dentalEnrolled > 0 ? row.dentalEnrolled.toLocaleString() : "—"}
                       </td>
-                      <td className="px-4 py-3 text-center">
-                        {row.hasVision
-                          ? <CheckCircle2 className="w-4 h-4 text-emerald-500 inline" />
-                          : <XCircle className="w-4 h-4 text-gray-300 inline" />}
+                      <td className="px-4 py-3 text-right tabular-nums text-bob-text-soft">
+                        {row.visionEnrolled > 0 ? row.visionEnrolled.toLocaleString() : "—"}
                       </td>
-                      <td className="px-4 py-3 text-center">
-                        {row.hasSupplemental
-                          ? <CheckCircle2 className="w-4 h-4 text-emerald-500 inline" />
-                          : <XCircle className="w-4 h-4 text-gray-300 inline" />}
+                      <td className="px-4 py-3 text-right tabular-nums text-bob-text-soft">
+                        {row.supplementalEnrolled > 0 ? row.supplementalEnrolled.toLocaleString() : "—"}
                       </td>
                     </tr>
                   ))}

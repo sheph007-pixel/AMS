@@ -3,9 +3,10 @@ import { prisma } from "@/lib/db";
 import { deriveLifecycleStatus } from "@/lib/lifecycle";
 import { getExclusionRules, isExcluded } from "@/lib/exclusions";
 
+/* eslint-disable @typescript-eslint/no-explicit-any */
+
 /**
  * Helper: count active employees from a snapshot.
- * Uses individual employee records if available, falls back to totalEmployees.
  */
 function countActiveEmployees(snapshot: {
   totalEmployees: number | null;
@@ -20,10 +21,196 @@ function countActiveEmployees(snapshot: {
 }
 
 /**
- * Helper: sum premium from benefit plans in a snapshot.
+ * Classify a plan type string into one of: Medical, Dental, Vision, Supplemental
  */
-function sumPremium(plans: { premium: number | null }[]): number {
-  return plans.reduce((sum, p) => sum + (p.premium ?? 0), 0);
+function classifyPlanType(planType: string | null): string {
+  const t = (planType || "").toLowerCase();
+  if (t.includes("medical") || t.includes("health")) return "Medical";
+  if (t.includes("dental")) return "Dental";
+  if (t.includes("vision")) return "Vision";
+  return "Supplemental";
+}
+
+/**
+ * Compute per-plan-type enrolled counts and premium from enrollment metadata.
+ * Uses the same approach as the benefits report for consistency.
+ */
+function computePlanMetrics(snapshot: {
+  benefitPlans: {
+    planType: string | null;
+    carrier: string | null;
+    enrollees: number | null;
+    premium: number | null;
+    metadata: string | null;
+  }[];
+  employees: {
+    status: string | null;
+    metadata: string | null;
+  }[];
+}): {
+  enrolledByType: Record<string, number>;
+  totalPremium: number;
+} {
+  const enrolledByType: Record<string, number> = {
+    Medical: 0,
+    Dental: 0,
+    Vision: 0,
+    Supplemental: 0,
+  };
+
+  // Build plan lookup: PlanIdentifier/PlanName → planType
+  const planIdToType = new Map<string, string>();
+  const planNameToType = new Map<string, string>();
+  const planIdToCarrier = new Map<string, string>();
+  const planNameToCarrier = new Map<string, string>();
+
+  for (const bp of snapshot.benefitPlans) {
+    const category = classifyPlanType(bp.planType);
+    const carrier = bp.carrier || "";
+
+    if (bp.metadata) {
+      try {
+        const meta = JSON.parse(bp.metadata);
+        const planId = meta.PlanIdentifier || meta.planIdentifier;
+        if (planId) {
+          planIdToType.set(String(planId), category);
+          planIdToCarrier.set(String(planId), carrier);
+        }
+      } catch { /* ignore */ }
+    }
+
+    // Also map by planName for fallback matching
+    if (bp.planType) {
+      // Use planName from metadata if available
+      let planName: string | null = null;
+      if (bp.metadata) {
+        try {
+          const meta = JSON.parse(bp.metadata);
+          planName = meta.PlanName || meta.Name || null;
+        } catch { /* ignore */ }
+      }
+      if (planName) {
+        planNameToType.set(planName, category);
+        planNameToCarrier.set(planName, carrier);
+      }
+    }
+  }
+
+  let totalPremium = 0;
+
+  // If we have employee enrollment metadata, use it (matches benefits report)
+  const hasEnrollmentData = snapshot.employees.some((e) => e.metadata);
+
+  if (hasEnrollmentData && (planIdToType.size > 0 || planNameToType.size > 0)) {
+    // Track enrolled per type using sets to avoid double-counting
+    const enrolledSets: Record<string, Set<number>> = {
+      Medical: new Set(),
+      Dental: new Set(),
+      Vision: new Set(),
+      Supplemental: new Set(),
+    };
+
+    for (let empIdx = 0; empIdx < snapshot.employees.length; empIdx++) {
+      const emp = snapshot.employees[empIdx];
+      const status = (emp.status || "Active").toLowerCase();
+      if (status !== "active") continue;
+
+      if (!emp.metadata) continue;
+      let meta: any;
+      try {
+        meta = JSON.parse(emp.metadata);
+      } catch {
+        continue;
+      }
+
+      const enrollments = findEnrollments(meta);
+
+      for (const enrollment of enrollments) {
+        // Filter qualifying enrollments
+        const enrollmentType =
+          enrollment.EnrollmentType || enrollment.enrollmentType || enrollment.Type;
+        let isQualifying = false;
+        if (enrollmentType) {
+          isQualifying = String(enrollmentType).toLowerCase() === "current";
+        } else {
+          const declineReason = enrollment.DeclineReason || enrollment.declineReason;
+          const endDate = enrollment.CoverageEndDate || enrollment.EndDate || enrollment.EndedOn;
+          const isEnded = endDate && new Date(String(endDate)) <= new Date();
+          isQualifying = !declineReason && !isEnded;
+        }
+        if (!isQualifying) continue;
+
+        // Resolve plan type
+        const enrollPlanId = String(
+          enrollment.PlanIdentifier || enrollment.PlanId || enrollment.PlanID || ""
+        );
+        const enrollPlanName = String(
+          enrollment.PlanName || enrollment.Plan || enrollment.Name || ""
+        );
+
+        let category: string | undefined;
+        if (enrollPlanId) {
+          category = planIdToType.get(enrollPlanId);
+          if (!category && enrollPlanName) {
+            category = planNameToType.get(enrollPlanName);
+          }
+        } else if (enrollPlanName) {
+          category = planNameToType.get(enrollPlanName);
+        }
+
+        if (!category) continue;
+
+        enrolledSets[category].add(empIdx);
+
+        // Sum premium from enrollment PlanCost
+        const rawCost = String(
+          enrollment.PlanCost || enrollment.MonthlyPlanCost || ""
+        );
+        if (rawCost) {
+          const parsed = parseFloat(rawCost);
+          if (!isNaN(parsed)) totalPremium += parsed;
+        }
+      }
+    }
+
+    for (const type of Object.keys(enrolledByType)) {
+      enrolledByType[type] = enrolledSets[type].size;
+    }
+  } else {
+    // Fallback: use BenefitPlan.enrollees and BenefitPlan.premium
+    for (const bp of snapshot.benefitPlans) {
+      const category = classifyPlanType(bp.planType);
+      enrolledByType[category] += bp.enrollees ?? 0;
+      totalPremium += bp.premium ?? 0;
+    }
+  }
+
+  return { enrolledByType, totalPremium };
+}
+
+/**
+ * Find enrollment arrays from employee metadata (matches benefits report logic).
+ */
+function findEnrollments(meta: any): any[] {
+  if (!meta) return [];
+
+  // Direct array
+  if (Array.isArray(meta.Enrollments)) return meta.Enrollments;
+  if (Array.isArray(meta.enrollments)) return meta.enrollments;
+  if (Array.isArray(meta.Enrollment)) return meta.Enrollment;
+
+  // Nested under a wrapper
+  const enrollment = meta.Enrollments || meta.enrollments || meta.Enrollment;
+  if (enrollment && typeof enrollment === "object") {
+    if (Array.isArray(enrollment.Enrollment)) return enrollment.Enrollment;
+    if (Array.isArray(enrollment.enrollment)) return enrollment.enrollment;
+    // Single enrollment object
+    if (enrollment.PlanIdentifier || enrollment.PlanName || enrollment.PlanId) {
+      return [enrollment];
+    }
+  }
+
+  return [];
 }
 
 export async function GET() {
@@ -45,11 +232,13 @@ export async function GET() {
                 carrier: true,
                 enrollees: true,
                 premium: true,
+                metadata: true,
               },
             },
             employees: {
               select: {
                 status: true,
+                metadata: true,
               },
             },
           },
@@ -70,8 +259,6 @@ export async function GET() {
       allSystemYears.length > 0
         ? Math.max(...allSystemYears)
         : new Date().getFullYear();
-    // Use the actual previous data year (not currentYear - 1)
-    // to handle non-consecutive years like [2022, 2024, 2026]
     const previousYears = allSystemYears.filter((y) => y < currentYear);
     const lastYear =
       previousYears.length > 0
@@ -97,7 +284,6 @@ export async function GET() {
       const uniqueYears = [...new Set(years)];
       const status = deriveLifecycleStatus(uniqueYears, allSystemYears);
 
-      // Use the current-year snapshot for active groups (consistent with cards)
       const currentYearSnapshots = client.snapshots.filter(
         (s) => s.year === currentYear
       );
@@ -116,30 +302,29 @@ export async function GET() {
       // Active employee count from the current year snapshot
       const activeEmployeeCount = cySnap ? countActiveEmployees(cySnap) : null;
 
-      // Determine benefit types from the current year snapshot
-      const planTypes = new Set<string>();
-      if (cySnap) {
-        for (const plan of cySnap.benefitPlans) {
-          const t = plan.planType?.toLowerCase() || "";
-          if (t.includes("medical") || t.includes("health"))
-            planTypes.add("Medical");
-          else if (t.includes("dental")) planTypes.add("Dental");
-          else if (t.includes("vision")) planTypes.add("Vision");
-          else planTypes.add("Supplemental");
-        }
-      }
+      // Compute per-plan-type enrolled counts from current year
+      let medicalEnrolled = 0;
+      let dentalEnrolled = 0;
+      let visionEnrolled = 0;
+      let supplementalEnrolled = 0;
 
-      // Accumulate YoY metrics
       if (cySnap) {
+        const { enrolledByType, totalPremium } = computePlanMetrics(cySnap);
+        medicalEnrolled = enrolledByType.Medical;
+        dentalEnrolled = enrolledByType.Dental;
+        visionEnrolled = enrolledByType.Vision;
+        supplementalEnrolled = enrolledByType.Supplemental;
+
         currentYearActiveGroups++;
         currentYearEnrolled += countActiveEmployees(cySnap);
-        currentYearPremium += sumPremium(cySnap.benefitPlans);
+        currentYearPremium += totalPremium;
       }
 
       if (lySnap) {
+        const { totalPremium } = computePlanMetrics(lySnap);
         lastYearActiveGroups++;
         lastYearEnrolled += countActiveEmployees(lySnap);
-        lastYearPremium += sumPremium(lySnap.benefitPlans);
+        lastYearPremium += totalPremium;
       }
 
       return {
@@ -151,10 +336,10 @@ export async function GET() {
         years: uniqueYears,
         status,
         activeEmployees: activeEmployeeCount,
-        hasMedical: planTypes.has("Medical"),
-        hasDental: planTypes.has("Dental"),
-        hasVision: planTypes.has("Vision"),
-        hasSupplemental: planTypes.has("Supplemental"),
+        medicalEnrolled,
+        dentalEnrolled,
+        visionEnrolled,
+        supplementalEnrolled,
       };
     });
 
@@ -167,7 +352,6 @@ export async function GET() {
       0
     );
 
-    // Log audit for verification
     console.log("[Groups API Audit]", {
       systemYears: allSystemYears,
       currentYear,
