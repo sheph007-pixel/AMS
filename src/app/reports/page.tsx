@@ -17,6 +17,20 @@ const reports = [
       </svg>
     ),
   },
+  {
+    id: "income",
+    name: "Income Report",
+    description: "Estimated fee income from PEPM and commission carriers, auto-calculated from the latest upload",
+    href: "/reports/income",
+    color: "from-bob-green to-bob-teal",
+    iconBg: "bg-bob-green-light",
+    icon: (
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#10B981" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+        <line x1="12" y1="1" x2="12" y2="23" />
+        <path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6" />
+      </svg>
+    ),
+  },
 ];
 
 export default function ReportsPage() {
