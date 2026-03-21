@@ -6,11 +6,9 @@ export function MainContent({ children }: { children: React.ReactNode }) {
   const [collapsed, setCollapsed] = useState(false);
 
   useEffect(() => {
-    // Read initial state
     const saved = localStorage.getItem("sidebar-collapsed");
     if (saved === "true") setCollapsed(true);
 
-    // Listen for toggle events from sidebar
     function handleToggle(e: Event) {
       const detail = (e as CustomEvent).detail;
       setCollapsed(detail.collapsed);
@@ -21,10 +19,11 @@ export function MainContent({ children }: { children: React.ReactNode }) {
 
   return (
     <main
-      className="flex-1 min-h-screen transition-all duration-300"
-      style={{ marginLeft: collapsed ? 72 : 200 }}
+      className="flex-1 min-h-screen transition-all duration-300 md:ml-[var(--sidebar-ml)]"
+      style={{ "--sidebar-ml": `${collapsed ? 72 : 200}px` } as React.CSSProperties}
     >
-      <div className="max-w-6xl mx-auto px-8 py-8">
+      {/* On mobile: no margin-left, top padding for fixed header bar */}
+      <div className="max-w-6xl mx-auto px-4 py-4 pt-[72px] md:px-8 md:py-8 md:pt-8">
         {children}
       </div>
     </main>

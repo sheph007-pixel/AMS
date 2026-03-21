@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { useParams } from "next/navigation";
 import { ArrowLeft, Building2, Shield, Users, X, Calendar, MapPin, Hash } from "lucide-react";
+import { normalizeCompanyName } from "@/lib/normalize-name";
 
 interface BenefitPlan {
   id: string;
@@ -122,32 +123,32 @@ export default function ClientDetailPage() {
           <ArrowLeft className="w-4 h-4" /> Back to People
         </a>
 
-        <div className="bg-white rounded-3xl border border-bob-border p-7">
-          <div className="flex items-start justify-between">
-            <div className="flex items-center gap-5">
-              <div className="w-14 h-14 rounded-2xl bg-gradient-to-br from-bob-purple-light to-bob-blue-light flex items-center justify-center">
-                <span className="text-xl font-bold text-bob-purple">
-                  {client.groupName.charAt(0).toUpperCase()}
+        <div className="bg-white rounded-2xl md:rounded-3xl border border-bob-border p-4 md:p-7">
+          <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-4">
+            <div className="flex items-center gap-4 md:gap-5">
+              <div className="w-11 h-11 md:w-14 md:h-14 rounded-xl md:rounded-2xl bg-gradient-to-br from-bob-purple-light to-bob-blue-light flex items-center justify-center flex-shrink-0">
+                <span className="text-lg md:text-xl font-bold text-bob-purple">
+                  {normalizeCompanyName(client.groupName).charAt(0)}
                 </span>
               </div>
-              <div>
-                <div className="flex items-center gap-3">
-                  <h1 className="text-2xl font-bold text-bob-text">{client.groupName}</h1>
-                  <span className={`inline-flex items-center gap-1.5 px-3 py-1 text-xs font-semibold rounded-full ${sc.bg} ${sc.text}`}>
+              <div className="min-w-0">
+                <div className="flex flex-wrap items-center gap-2 md:gap-3">
+                  <h1 className="text-lg md:text-2xl font-bold text-bob-text truncate">{normalizeCompanyName(client.groupName)}</h1>
+                  <span className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 md:px-3 md:py-1 text-[10px] md:text-xs font-semibold rounded-full ${sc.bg} ${sc.text}`}>
                     <span className={`w-1.5 h-1.5 rounded-full ${sc.dot}`} />
                     {client.status}
                   </span>
                 </div>
-                <div className="flex items-center gap-4 mt-2 text-sm text-bob-text-soft">
+                <div className="flex flex-wrap items-center gap-3 md:gap-4 mt-1.5 md:mt-2 text-xs md:text-sm text-bob-text-soft">
                   <span className="flex items-center gap-1"><Hash className="w-3.5 h-3.5" />{client.groupId}</span>
                   {client.state && <span className="flex items-center gap-1"><MapPin className="w-3.5 h-3.5" />{client.state}</span>}
                   {client.sicCode && <span>SIC {client.sicCode}</span>}
                 </div>
               </div>
             </div>
-            <div className="flex gap-1.5">
+            <div className="flex gap-1.5 flex-wrap">
               {client.snapshots.map((s) => (
-                <span key={s.id} className="px-3 py-1.5 text-xs font-medium bg-bob-bg text-bob-text-soft rounded-xl">
+                <span key={s.id} className="px-2.5 py-1 md:px-3 md:py-1.5 text-[10px] md:text-xs font-medium bg-bob-bg text-bob-text-soft rounded-lg md:rounded-xl">
                   {s.month > 0 ? `${s.month}/${s.year}` : s.year}
                 </span>
               ))}
@@ -157,7 +158,7 @@ export default function ClientDetailPage() {
       </div>
 
       {/* Tabs */}
-      <div className="flex gap-1 mb-6 bg-bob-bg rounded-2xl p-1.5 inline-flex">
+      <div className="flex gap-1 mb-6 bg-bob-bg rounded-2xl p-1.5 overflow-x-auto">
         {tabs.map((t) => (
           <button
             key={t.key}
@@ -218,7 +219,7 @@ function OverviewTab({ client }: { client: ClientDetail }) {
       title: "Group Info",
       fields: [
         { label: "Group ID", value: client.groupId },
-        { label: "Group Name", value: client.groupName },
+        { label: "Group Name", value: normalizeCompanyName(client.groupName) },
         { label: "State", value: client.state },
         { label: "SIC Code", value: client.sicCode },
       ],

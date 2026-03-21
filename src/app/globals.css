@@ -97,6 +97,15 @@ body {
 .stagger-children > *:nth-child(9) { animation-delay: 0.27s; }
 .stagger-children > *:nth-child(10) { animation-delay: 0.3s; }
 
+/* Sidebar: hidden on mobile, CSS-var width on desktop */
+@media (min-width: 768px) {
+  .sidebar-nav { width: var(--sidebar-w, 200px); }
+}
+@media (max-width: 767px) {
+  /* On mobile, main content has no left margin */
+  main { margin-left: 0 !important; }
+}
+
 /* Custom scrollbar */
 ::-webkit-scrollbar { width: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }

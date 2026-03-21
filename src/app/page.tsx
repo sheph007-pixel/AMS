@@ -5,6 +5,7 @@ import {
   Search, Users, DollarSign, Download,
   ArrowUpDown, ArrowUp, ArrowDown, Building2,
 } from "lucide-react";
+import { normalizeCompanyName } from "@/lib/normalize-name";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -35,25 +36,6 @@ type SortKey = "groupName" | "state" | "activeEmployees";
 type SortDir = "asc" | "desc";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
-
-function toTitleCase(str: string): string {
-  const uppercaseWords = new Set(["LLC", "INC", "CO", "LP", "LLP", "PC", "PA", "DBA", "USA", "US"]);
-  const lowercaseWords = new Set(["of", "the", "and", "in", "for", "on", "at", "to", "a", "an"]);
-
-  return str
-    .split(/\s+/)
-    .map((word, index) => {
-      const clean = word.replace(/[.,]+$/, "");
-      const punctuation = word.slice(clean.length);
-      if (uppercaseWords.has(clean.toUpperCase())) return clean.toUpperCase() + punctuation;
-      if (index > 0 && lowercaseWords.has(clean.toLowerCase())) return clean.toLowerCase() + punctuation;
-      if (clean === clean.toUpperCase() && clean.length > 1) {
-        return clean.charAt(0).toUpperCase() + clean.slice(1).toLowerCase() + punctuation;
-      }
-      return clean.charAt(0).toUpperCase() + clean.slice(1) + punctuation;
-    })
-    .join(" ");
-}
 
 function pctChange(current: number, previous: number): number | null {
   if (previous === 0) return current > 0 ? 100 : null;
@@ -86,7 +68,7 @@ function toCSV(rows: ClientRow[]): string {
   const header = "Group,State,# Employees,Medical,Dental,Vision,Supplemental (Guardian)";
   const lines = rows.map((r) =>
     [
-      `"${toTitleCase(r.groupName)}"`,
+      `"${normalizeCompanyName(r.groupName)}"`,
       r.state || "",
       r.activeEmployees,
       r.medicalEnrolled,
@@ -243,7 +225,7 @@ export default function GroupsPage() {
 
       {/* Stat cards — YoY comparison */}
       {yoy && (
-        <div className="grid grid-cols-3 gap-4 mb-8 stagger-children">
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 sm:gap-4 mb-8 stagger-children">
           {cards.map((card) => (
             <div
               key={card.label}
@@ -282,7 +264,7 @@ export default function GroupsPage() {
 
       {/* Search + Export */}
       <div className="flex gap-4 mb-5 flex-wrap items-center">
-        <div className="relative flex-1 min-w-[240px]">
+        <div className="relative flex-1 min-w-0 sm:min-w-[240px]">
           <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-bob-text-soft" />
           <input
             type="text"
@@ -325,7 +307,8 @@ export default function GroupsPage() {
         </div>
       ) : (
         <>
-          <div ref={tableRef} className="bg-white rounded-2xl border border-bob-border overflow-hidden">
+          {/* Desktop table */}
+          <div ref={tableRef} className="hidden md:block bg-white rounded-2xl border border-bob-border overflow-hidden">
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
                 <thead className="bg-bob-bg border-b border-bob-border">
@@ -362,7 +345,7 @@ export default function GroupsPage() {
                           href={`/clients/${row.id}`}
                           className="text-bob-purple hover:underline hover:text-bob-purple/80 transition-colors"
                         >
-                          {toTitleCase(row.groupName)}
+                          {normalizeCompanyName(row.groupName)}
                         </a>
                       </td>
                       <td className="px-4 py-3 text-bob-text-soft">{row.state || "—"}</td>
@@ -387,6 +370,39 @@ export default function GroupsPage() {
               </table>
             </div>
           </div>
+
+          {/* Mobile card list */}
+          <div className="md:hidden flex flex-col gap-2">
+            {sorted.map((row) => (
+              <a
+                key={row.id}
+                href={`/clients/${row.id}`}
+                className="bg-white rounded-xl border border-bob-border p-4 active:bg-bob-bg transition-colors"
+              >
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-sm font-semibold text-bob-purple truncate mr-2">
+                    {normalizeCompanyName(row.groupName)}
+                  </span>
+                  <span className="text-xs text-bob-text-soft flex-shrink-0">{row.state || "—"}</span>
+                </div>
+                <div className="grid grid-cols-3 gap-2 text-xs">
+                  <div>
+                    <span className="text-bob-text-soft">Employees</span>
+                    <p className="font-semibold text-bob-text tabular-nums">{row.activeEmployees > 0 ? row.activeEmployees.toLocaleString() : "—"}</p>
+                  </div>
+                  <div>
+                    <span className="text-bob-text-soft">Medical</span>
+                    <p className="font-semibold text-bob-text tabular-nums">{row.medicalEnrolled > 0 ? row.medicalEnrolled.toLocaleString() : "—"}</p>
+                  </div>
+                  <div>
+                    <span className="text-bob-text-soft">Dental</span>
+                    <p className="font-semibold text-bob-text tabular-nums">{row.dentalEnrolled > 0 ? row.dentalEnrolled.toLocaleString() : "—"}</p>
+                  </div>
+                </div>
+              </a>
+            ))}
+          </div>
+
           <div className="mt-3 text-xs text-bob-text-soft">
             Showing {sorted.length.toLocaleString()} of {rows.length.toLocaleString()} active groups
           </div>
