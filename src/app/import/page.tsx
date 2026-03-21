@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import {
   Upload, CheckCircle, AlertCircle, FileText, X,
-  Loader2, ShieldCheck, ArrowRight,
+  Loader2, ShieldCheck, ArrowRight, RefreshCw,
 } from "lucide-react";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -34,6 +34,7 @@ interface StagedFile {
   parsedMonth: number | null;
   dateStr: string | null;   // e.g. "20251212"
   conflict: boolean;        // true if slot already has data
+  override: boolean;        // true if user chose to override existing data
 }
 
 interface QueueItem {
@@ -137,10 +138,25 @@ export default function ImportPage() {
     }
   }
 
+  const [overrideConfirm, setOverrideConfirm] = useState<{ year: number; month: number } | null>(null);
+
   function handleCellClick(year: number, month: number) {
-    if (getPeriod(year, month)) return;
+    const existing = getPeriod(year, month);
+    if (existing) {
+      // Show override confirmation
+      setOverrideConfirm({ year, month });
+      return;
+    }
     setPendingCell({ year, month });
     fileInputRef.current?.click();
+  }
+
+  function confirmCellOverride() {
+    if (!overrideConfirm) return;
+    setPendingCell(overrideConfirm);
+    setOverrideConfirm(null);
+    // Need slight delay so the ref is set before click
+    setTimeout(() => fileInputRef.current?.click(), 0);
   }
 
   function handleFileSelected(e: React.ChangeEvent<HTMLInputElement>) {
@@ -155,7 +171,6 @@ export default function ImportPage() {
   function handleCellDrop(e: React.DragEvent, year: number, month: number) {
     e.preventDefault();
     setDragTarget(null);
-    if (getPeriod(year, month)) return;
     const file = e.dataTransfer.files[0];
     if (file && file.name.toLowerCase().endsWith(".xml")) {
       handleUpload(file, year, month);
@@ -177,6 +192,7 @@ export default function ImportPage() {
         parsedMonth: parsed?.month ?? null,
         dateStr: parsed?.dateStr ?? null,
         conflict,
+        override: false,
       };
     });
 
@@ -198,10 +214,16 @@ export default function ImportPage() {
     setStaged([]);
   }
 
+  function toggleOverride(index: number) {
+    setStaged((prev) =>
+      prev.map((s, i) => (i === index ? { ...s, override: !s.override } : s))
+    );
+  }
+
   function confirmAndUpload() {
-    // Only upload valid, non-conflicting files
+    // Upload valid files: non-conflicting, or conflict with override enabled
     const valid = staged.filter(
-      (s) => s.parsedYear !== null && s.parsedMonth !== null && !s.conflict
+      (s) => s.parsedYear !== null && s.parsedMonth !== null && (!s.conflict || s.override)
     );
 
     const items: QueueItem[] = valid.map((s) => ({
@@ -217,13 +239,13 @@ export default function ImportPage() {
   }
 
   const validStaged = staged.filter(
-    (s) => s.parsedYear !== null && s.parsedMonth !== null && !s.conflict
+    (s) => s.parsedYear !== null && s.parsedMonth !== null && (!s.conflict || s.override)
   );
   const invalidStaged = staged.filter(
     (s) => s.parsedYear === null || s.parsedMonth === null
   );
   const conflictStaged = staged.filter(
-    (s) => s.parsedYear !== null && s.parsedMonth !== null && s.conflict
+    (s) => s.parsedYear !== null && s.parsedMonth !== null && s.conflict && !s.override
   );
 
   // ─── Process queue sequentially ──────────────────────────────────────
@@ -368,8 +390,8 @@ export default function ImportPage() {
                 </span>
               )}
               {conflictStaged.length > 0 && (
-                <span className="text-red-500 ml-1">
-                  {conflictStaged.length} file{conflictStaged.length > 1 ? "s" : ""} already uploaded (will be skipped).
+                <span className="text-amber-600 ml-1">
+                  {conflictStaged.length} file{conflictStaged.length > 1 ? "s" : ""} already uploaded — click &quot;Exists&quot; to override.
                 </span>
               )}
             </p>
@@ -396,7 +418,7 @@ export default function ImportPage() {
                 {staged.map((s, i) => {
                   const hasDate = s.parsedYear !== null && s.parsedMonth !== null;
                   return (
-                    <tr key={i} className={`${s.conflict ? "bg-red-50/50" : !hasDate ? "bg-amber-50/50" : "hover:bg-gray-50"}`}>
+                    <tr key={i} className={`${s.conflict && !s.override ? "bg-amber-50/30" : s.conflict && s.override ? "bg-bob-purple-light/30" : !hasDate ? "bg-amber-50/50" : "hover:bg-gray-50"}`}>
                       <td className="px-5 py-2.5 text-xs text-bob-text-soft">{i + 1}</td>
                       <td className="px-3 py-2.5">
                         <p className="text-sm text-bob-text truncate max-w-xs" title={s.file.name}>
@@ -424,10 +446,22 @@ export default function ImportPage() {
                         )}
                       </td>
                       <td className="px-3 py-2.5 text-center">
-                        {s.conflict ? (
-                          <span className="inline-flex items-center gap-1 text-xs text-red-500 font-medium">
+                        {s.conflict && !s.override ? (
+                          <button
+                            onClick={() => toggleOverride(i)}
+                            className="inline-flex items-center gap-1 text-xs text-amber-600 font-medium hover:text-amber-700 transition-colors"
+                            title="Click to override existing data"
+                          >
                             <AlertCircle className="w-3 h-3" /> Exists
-                          </span>
+                          </button>
+                        ) : s.conflict && s.override ? (
+                          <button
+                            onClick={() => toggleOverride(i)}
+                            className="inline-flex items-center gap-1 text-xs text-bob-purple font-medium hover:text-bob-purple/80 transition-colors"
+                            title="Will replace existing data — click to undo"
+                          >
+                            <RefreshCw className="w-3 h-3" /> Override
+                          </button>
                         ) : hasDate ? (
                           <span className="inline-flex items-center gap-1 text-xs text-emerald-600 font-medium">
                             <CheckCircle className="w-3 h-3" /> Ready
@@ -679,27 +713,25 @@ export default function ImportPage() {
                       return (
                         <td key={month} className="px-1 py-2">
                           <div
-                            onClick={() => !hasData && !isUploading && handleCellClick(year, month)}
+                            onClick={() => !isUploading && handleCellClick(year, month)}
                             onDragOver={(e) => {
-                              if (!hasData) {
-                                e.preventDefault();
-                                setDragTarget({ year, month });
-                              }
+                              e.preventDefault();
+                              setDragTarget({ year, month });
                             }}
                             onDragLeave={() => setDragTarget(null)}
                             onDrop={(e) => handleCellDrop(e, year, month)}
-                            className={`rounded-lg px-2 py-2.5 text-center transition-all duration-200 min-h-[52px] flex flex-col items-center justify-center ${
+                            className={`group relative rounded-lg px-2 py-2.5 text-center transition-all duration-200 min-h-[52px] flex flex-col items-center justify-center cursor-pointer ${
                               hasData
-                                ? "bg-emerald-50 border border-emerald-200 cursor-default"
+                                ? "bg-emerald-50 border border-emerald-200 hover:border-bob-purple/40 hover:bg-emerald-50/60"
                                 : isUploading
                                 ? "bg-bob-purple-light border border-bob-purple/30"
                                 : isDragOver
                                 ? "bg-bob-purple-light/50 border-2 border-dashed border-bob-purple scale-105"
-                                : "bg-bob-bg/50 border border-dashed border-bob-border hover:border-bob-purple/40 hover:bg-bob-purple-light/20 cursor-pointer"
+                                : "bg-bob-bg/50 border border-dashed border-bob-border hover:border-bob-purple/40 hover:bg-bob-purple-light/20"
                             }`}
                             title={
                               hasData
-                                ? `${period.groups} groups, ${period.employees.toLocaleString()} employees\nUploaded: ${period.importedAt ? new Date(period.importedAt).toLocaleDateString() : "—"}`
+                                ? `${period.groups} groups, ${period.employees.toLocaleString()} employees\nUploaded: ${period.importedAt ? new Date(period.importedAt).toLocaleDateString() : "—"}\nClick to replace`
                                 : `Upload ${MONTH_FULL[month]} ${year}`
                             }
                           >
@@ -707,8 +739,9 @@ export default function ImportPage() {
                               <Loader2 className="w-4 h-4 animate-spin text-bob-purple" />
                             ) : hasData ? (
                               <>
-                                <CheckCircle className="w-3.5 h-3.5 text-emerald-500 mb-0.5" />
-                                <span className="text-[10px] font-semibold text-emerald-700">{period.groups}</span>
+                                <CheckCircle className="w-3.5 h-3.5 text-emerald-500 mb-0.5 group-hover:hidden" />
+                                <RefreshCw className="w-3.5 h-3.5 text-bob-purple mb-0.5 hidden group-hover:block" />
+                                <span className="text-[10px] font-semibold text-emerald-700 group-hover:text-bob-purple">{period.groups}</span>
                               </>
                             ) : (
                               <Upload className="w-3.5 h-3.5 text-gray-300" />
@@ -724,6 +757,65 @@ export default function ImportPage() {
           </div>
         </div>
       )}
+
+      {/* Override Confirmation Modal */}
+      {overrideConfirm && (() => {
+        const p = getPeriod(overrideConfirm.year, overrideConfirm.month);
+        return (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center">
+            <div className="absolute inset-0 bg-black/30 backdrop-blur-sm" onClick={() => setOverrideConfirm(null)} />
+            <div className="relative bg-white rounded-2xl shadow-2xl p-6 w-[380px] animate-fade-in-up">
+              <div className="text-center mb-5">
+                <div className="w-12 h-12 rounded-2xl bg-amber-50 flex items-center justify-center mx-auto mb-3">
+                  <RefreshCw className="w-6 h-6 text-amber-500" />
+                </div>
+                <h3 className="text-lg font-semibold text-bob-text">Replace Existing Data?</h3>
+                <p className="text-sm text-bob-text-soft mt-1">
+                  <strong>{MONTH_FULL[overrideConfirm.month]} {overrideConfirm.year}</strong> already has data.
+                </p>
+              </div>
+
+              {p && (
+                <div className="bg-bob-bg rounded-xl p-3 mb-5 text-sm">
+                  <div className="flex justify-between text-bob-text-soft">
+                    <span>Groups</span>
+                    <span className="font-medium text-bob-text">{p.groups}</span>
+                  </div>
+                  <div className="flex justify-between text-bob-text-soft mt-1">
+                    <span>Employees</span>
+                    <span className="font-medium text-bob-text">{p.employees.toLocaleString()}</span>
+                  </div>
+                  {p.importedAt && (
+                    <div className="flex justify-between text-bob-text-soft mt-1">
+                      <span>Uploaded</span>
+                      <span className="font-medium text-bob-text">{new Date(p.importedAt).toLocaleDateString()}</span>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              <p className="text-xs text-bob-text-soft text-center mb-4">
+                The existing data will be permanently replaced with the new file.
+              </p>
+
+              <div className="flex gap-3">
+                <button
+                  onClick={() => setOverrideConfirm(null)}
+                  className="flex-1 py-2.5 text-sm text-bob-text-soft hover:text-bob-text border border-bob-border rounded-xl transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={confirmCellOverride}
+                  className="flex-1 py-2.5 text-sm font-semibold text-white bg-bob-purple rounded-xl hover:bg-bob-purple/90 transition-colors"
+                >
+                  Replace Data
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Hidden file input for cell clicks */}
       <input
