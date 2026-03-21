@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import {
   Upload, CheckCircle, AlertCircle, FileText, X,
-  Loader2,
+  Loader2, ShieldCheck, ArrowRight,
 } from "lucide-react";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -28,8 +28,19 @@ interface ImportResult {
   employeesProcessed: number;
 }
 
+interface StagedFile {
+  file: File;
+  parsedYear: number | null;
+  parsedMonth: number | null;
+  dateStr: string | null;   // e.g. "20251212"
+  conflict: boolean;        // true if slot already has data
+}
+
 interface QueueItem {
   file: File;
+  year: number;
+  month: number;
+  dateStr: string;
   status: "pending" | "uploading" | "done" | "error";
   result?: ImportResult;
   error?: string;
@@ -55,6 +66,17 @@ function formatSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+/** Parse YYYYMMDD from filename like Data_API_20251212_114559_16617.xml */
+function parseDateFromFilename(filename: string): { year: number; month: number; dateStr: string } | null {
+  // Look for 8-digit date pattern YYYYMMDD
+  const match = filename.match(/(\d{4})(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])/);
+  if (!match) return null;
+  const year = parseInt(match[1], 10);
+  const month = parseInt(match[2], 10);
+  if (year < 2000 || year > 2100) return null;
+  return { year, month, dateStr: `${match[1]}${match[2]}${match[3]}` };
+}
+
 // ─── Main Page ────────────────────────────────────────────────────────────────
 
 export default function ImportPage() {
@@ -65,7 +87,9 @@ export default function ImportPage() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [pendingCell, setPendingCell] = useState<{ year: number; month: number } | null>(null);
 
-  // Batch upload queue
+  // Staged files (pre-confirmation review)
+  const [staged, setStaged] = useState<StagedFile[]>([]);
+  // Active upload queue (post-confirmation)
   const [queue, setQueue] = useState<QueueItem[]>([]);
   const [batchProcessing, setBatchProcessing] = useState(false);
   const [dragOver, setDragOver] = useState(false);
@@ -107,7 +131,7 @@ export default function ImportPage() {
       if (!res.ok) throw new Error(data.error || "Import failed");
       fetchPeriods();
     } catch {
-      // Silently handle — cell will remain empty for retry
+      // Cell remains empty for retry
     } finally {
       setUploading(null);
     }
@@ -138,21 +162,72 @@ export default function ImportPage() {
     }
   }
 
-  // ─── Batch upload (multiple files, auto-detect dates) ────────────────
+  // ─── Staging (select files → parse dates → show for review) ──────────
 
-  function addFilesToQueue(files: File[]) {
+  function stageFiles(files: File[]) {
     const xmlFiles = files.filter((f) => f.name.toLowerCase().endsWith(".xml"));
     if (xmlFiles.length === 0) return;
 
-    const items: QueueItem[] = xmlFiles.map((file) => ({
-      file,
+    const items: StagedFile[] = xmlFiles.map((file) => {
+      const parsed = parseDateFromFilename(file.name);
+      const conflict = parsed ? !!getPeriod(parsed.year, parsed.month) : false;
+      return {
+        file,
+        parsedYear: parsed?.year ?? null,
+        parsedMonth: parsed?.month ?? null,
+        dateStr: parsed?.dateStr ?? null,
+        conflict,
+      };
+    });
+
+    // Sort by date (earliest first)
+    items.sort((a, b) => {
+      if (!a.dateStr) return 1;
+      if (!b.dateStr) return -1;
+      return a.dateStr.localeCompare(b.dateStr);
+    });
+
+    setStaged(items);
+  }
+
+  function removeStagedFile(index: number) {
+    setStaged((prev) => prev.filter((_, i) => i !== index));
+  }
+
+  function cancelStaging() {
+    setStaged([]);
+  }
+
+  function confirmAndUpload() {
+    // Only upload valid, non-conflicting files
+    const valid = staged.filter(
+      (s) => s.parsedYear !== null && s.parsedMonth !== null && !s.conflict
+    );
+
+    const items: QueueItem[] = valid.map((s) => ({
+      file: s.file,
+      year: s.parsedYear!,
+      month: s.parsedMonth!,
+      dateStr: s.dateStr!,
       status: "pending" as const,
     }));
 
-    setQueue((prev) => [...prev, ...items]);
+    setQueue(items);
+    setStaged([]);
   }
 
-  // Process queue sequentially
+  const validStaged = staged.filter(
+    (s) => s.parsedYear !== null && s.parsedMonth !== null && !s.conflict
+  );
+  const invalidStaged = staged.filter(
+    (s) => s.parsedYear === null || s.parsedMonth === null
+  );
+  const conflictStaged = staged.filter(
+    (s) => s.parsedYear !== null && s.parsedMonth !== null && s.conflict
+  );
+
+  // ─── Process queue sequentially ──────────────────────────────────────
+
   useEffect(() => {
     if (batchProcessing) return;
     const nextIndex = queue.findIndex((q) => q.status === "pending");
@@ -169,6 +244,8 @@ export default function ImportPage() {
 
     const formData = new FormData();
     formData.append("file", item.file);
+    formData.append("year", String(item.year));
+    formData.append("month", String(item.month));
 
     fetch("/api/import", { method: "POST", body: formData })
       .then((res) => res.json().then((data) => ({ ok: res.ok, data })))
@@ -206,6 +283,19 @@ export default function ImportPage() {
   const queueErrors = queue.filter((q) => q.status === "error").length;
   const queueTotal = queue.length;
   const queueActive = queue.some((q) => q.status === "pending" || q.status === "uploading");
+  const queueFinished = queueTotal > 0 && !queueActive;
+
+  // ─── Audit check: compare filename date vs API response ──────────────
+
+  function getAuditStatus(item: QueueItem): "match" | "mismatch" | "pending" {
+    if (item.status !== "done" || !item.result) return "pending";
+    const filenameYear = item.year;
+    const filenameMonth = item.month;
+    const apiYear = item.result.year;
+    const apiMonth = item.result.month;
+    if (filenameYear === apiYear && filenameMonth === apiMonth) return "match";
+    return "mismatch";
+  }
 
   // Stats
   const totalUploaded = periods.length;
@@ -216,72 +306,189 @@ export default function ImportPage() {
       <div className="mb-8">
         <h1 className="text-3xl font-bold tracking-tight text-bob-text">Upload Data</h1>
         <p className="text-bob-text-soft mt-1">
-          Upload XML files for each month. Date auto-detected from file. Data is locked once uploaded.
+          Upload XML files for each month. Date is read from the filename. Data is permanently stored once uploaded.
         </p>
       </div>
 
       {/* Bulk Drop Zone — multiple files */}
-      <div className="mb-6">
-        <div
-          onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
-          onDragLeave={() => setDragOver(false)}
-          onDrop={(e) => {
-            e.preventDefault();
-            setDragOver(false);
-            addFilesToQueue(Array.from(e.dataTransfer.files));
-          }}
-          onClick={() => {
-            const input = document.createElement("input");
-            input.type = "file";
-            input.accept = ".xml";
-            input.multiple = true;
-            input.onchange = (e) => {
-              const files = Array.from((e.target as HTMLInputElement).files || []);
-              if (files.length > 0) addFilesToQueue(files);
-            };
-            input.click();
-          }}
-          className={`bg-white rounded-2xl border-2 border-dashed transition-all duration-200 cursor-pointer p-8 text-center ${
-            dragOver
-              ? "border-bob-purple bg-bob-purple-light/30 scale-[1.01]"
-              : "border-bob-border hover:border-bob-purple/40 hover:bg-gray-50"
-          }`}
-        >
-          <div className="flex flex-col items-center gap-2">
-            <div className={`w-12 h-12 rounded-xl flex items-center justify-center transition-all ${
-              dragOver ? "bg-bob-purple-light" : "bg-bob-bg"
-            }`}>
-              <Upload className={`w-6 h-6 ${dragOver ? "text-bob-purple" : "text-bob-text-soft"}`} />
+      {staged.length === 0 && !queueActive && (
+        <div className="mb-6">
+          <div
+            onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+            onDragLeave={() => setDragOver(false)}
+            onDrop={(e) => {
+              e.preventDefault();
+              setDragOver(false);
+              stageFiles(Array.from(e.dataTransfer.files));
+            }}
+            onClick={() => {
+              const input = document.createElement("input");
+              input.type = "file";
+              input.accept = ".xml";
+              input.multiple = true;
+              input.onchange = (e) => {
+                const files = Array.from((e.target as HTMLInputElement).files || []);
+                if (files.length > 0) stageFiles(files);
+              };
+              input.click();
+            }}
+            className={`bg-white rounded-2xl border-2 border-dashed transition-all duration-200 cursor-pointer p-8 text-center ${
+              dragOver
+                ? "border-bob-purple bg-bob-purple-light/30 scale-[1.01]"
+                : "border-bob-border hover:border-bob-purple/40 hover:bg-gray-50"
+            }`}
+          >
+            <div className="flex flex-col items-center gap-2">
+              <div className={`w-12 h-12 rounded-xl flex items-center justify-center transition-all ${
+                dragOver ? "bg-bob-purple-light" : "bg-bob-bg"
+              }`}>
+                <Upload className={`w-6 h-6 ${dragOver ? "text-bob-purple" : "text-bob-text-soft"}`} />
+              </div>
+              <p className="text-sm font-semibold text-bob-text">
+                {dragOver ? "Drop files here" : "Drop XML files or click to select"}
+              </p>
+              <p className="text-xs text-bob-text-soft">
+                Select multiple files — date is parsed from filename (e.g. Data_API_<strong>20251212</strong>_114559_16617.xml)
+              </p>
             </div>
-            <p className="text-sm font-semibold text-bob-text">
-              {dragOver ? "Drop files here" : "Drop XML files or click to select"}
-            </p>
-            <p className="text-xs text-bob-text-soft">
-              Select multiple files — each will auto-assign to the correct month based on the date in the XML
-            </p>
           </div>
         </div>
-      </div>
+      )}
 
-      {/* Batch Queue */}
+      {/* ─── STEP 1: Confirmation Review ──────────────────────────────── */}
+      {staged.length > 0 && (
+        <div className="mb-6 bg-white rounded-2xl border border-bob-border overflow-hidden">
+          <div className="px-5 py-4 bg-bob-bg border-b border-bob-border">
+            <h2 className="text-sm font-semibold text-bob-text">Review File Assignments</h2>
+            <p className="text-xs text-bob-text-soft mt-0.5">
+              Confirm each file is mapped to the correct month before uploading.
+              {invalidStaged.length > 0 && (
+                <span className="text-amber-600 ml-1">
+                  {invalidStaged.length} file{invalidStaged.length > 1 ? "s" : ""} could not be parsed.
+                </span>
+              )}
+              {conflictStaged.length > 0 && (
+                <span className="text-red-500 ml-1">
+                  {conflictStaged.length} file{conflictStaged.length > 1 ? "s" : ""} already uploaded (will be skipped).
+                </span>
+              )}
+            </p>
+          </div>
+
+          {/* File mapping table */}
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead className="bg-gray-50 border-b border-bob-border-light">
+                <tr>
+                  <th className="px-5 py-2 text-left text-xs font-medium text-bob-text-soft w-8">#</th>
+                  <th className="px-3 py-2 text-left text-xs font-medium text-bob-text-soft">Filename</th>
+                  <th className="px-3 py-2 text-left text-xs font-medium text-bob-text-soft w-28">Size</th>
+                  <th className="px-3 py-2 text-left text-xs font-medium text-bob-text-soft w-28">Date Found</th>
+                  <th className="px-3 py-2 text-center text-xs font-medium text-bob-text-soft w-8">
+                    <ArrowRight className="w-3 h-3 mx-auto" />
+                  </th>
+                  <th className="px-3 py-2 text-left text-xs font-medium text-bob-text-soft w-40">Assigned Slot</th>
+                  <th className="px-3 py-2 text-center text-xs font-medium text-bob-text-soft w-16">Status</th>
+                  <th className="px-3 py-2 w-10" />
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-bob-border-light">
+                {staged.map((s, i) => {
+                  const hasDate = s.parsedYear !== null && s.parsedMonth !== null;
+                  return (
+                    <tr key={i} className={`${s.conflict ? "bg-red-50/50" : !hasDate ? "bg-amber-50/50" : "hover:bg-gray-50"}`}>
+                      <td className="px-5 py-2.5 text-xs text-bob-text-soft">{i + 1}</td>
+                      <td className="px-3 py-2.5">
+                        <p className="text-sm text-bob-text truncate max-w-xs" title={s.file.name}>
+                          {s.file.name}
+                        </p>
+                      </td>
+                      <td className="px-3 py-2.5 text-xs text-bob-text-soft">{formatSize(s.file.size)}</td>
+                      <td className="px-3 py-2.5">
+                        {s.dateStr ? (
+                          <span className="text-xs font-mono text-bob-text">{s.dateStr}</span>
+                        ) : (
+                          <span className="text-xs text-amber-600">No date</span>
+                        )}
+                      </td>
+                      <td className="px-3 py-2.5 text-center">
+                        {hasDate && <ArrowRight className="w-3 h-3 text-bob-text-soft mx-auto" />}
+                      </td>
+                      <td className="px-3 py-2.5">
+                        {hasDate ? (
+                          <span className={`text-sm font-medium ${s.conflict ? "text-red-500" : "text-bob-text"}`}>
+                            {MONTH_FULL[s.parsedMonth!]} {s.parsedYear}
+                          </span>
+                        ) : (
+                          <span className="text-xs text-amber-600">—</span>
+                        )}
+                      </td>
+                      <td className="px-3 py-2.5 text-center">
+                        {s.conflict ? (
+                          <span className="inline-flex items-center gap-1 text-xs text-red-500 font-medium">
+                            <AlertCircle className="w-3 h-3" /> Exists
+                          </span>
+                        ) : hasDate ? (
+                          <span className="inline-flex items-center gap-1 text-xs text-emerald-600 font-medium">
+                            <CheckCircle className="w-3 h-3" /> Ready
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1 text-xs text-amber-600 font-medium">
+                            <AlertCircle className="w-3 h-3" /> Skip
+                          </span>
+                        )}
+                      </td>
+                      <td className="px-3 py-2.5">
+                        <button onClick={() => removeStagedFile(i)} className="text-gray-300 hover:text-gray-500">
+                          <X className="w-3.5 h-3.5" />
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+
+          {/* Confirm / Cancel buttons */}
+          <div className="px-5 py-4 bg-gray-50 border-t border-bob-border flex items-center justify-between">
+            <p className="text-xs text-bob-text-soft">
+              {validStaged.length} of {staged.length} file{staged.length > 1 ? "s" : ""} will be uploaded
+            </p>
+            <div className="flex items-center gap-3">
+              <button
+                onClick={cancelStaging}
+                className="px-4 py-2 text-sm text-bob-text-soft hover:text-bob-text transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={confirmAndUpload}
+                disabled={validStaged.length === 0}
+                className="px-5 py-2 text-sm font-semibold text-white bg-bob-purple rounded-lg hover:bg-bob-purple/90 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                Confirm &amp; Upload {validStaged.length} File{validStaged.length !== 1 ? "s" : ""}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ─── STEP 2: Upload Queue + Progress ──────────────────────────── */}
       {queue.length > 0 && (
         <div className="mb-6 bg-white rounded-2xl border border-bob-border overflow-hidden">
-          {/* Queue header */}
           <div className="px-5 py-3 bg-bob-bg border-b border-bob-border flex items-center justify-between">
             <div className="flex items-center gap-3">
               <span className="text-sm font-semibold text-bob-text">
-                Upload Queue
+                {queueFinished ? "Upload Complete" : "Uploading..."}
               </span>
               <span className="text-xs text-bob-text-soft">
                 {queueDone} of {queueTotal} complete
                 {queueErrors > 0 && <span className="text-red-500 ml-1">({queueErrors} failed)</span>}
               </span>
             </div>
-            {!queueActive && (
-              <button
-                onClick={clearQueue}
-                className="text-xs text-bob-text-soft hover:text-bob-text transition-colors"
-              >
+            {queueFinished && (
+              <button onClick={clearQueue} className="text-xs text-bob-text-soft hover:text-bob-text transition-colors">
                 Clear
               </button>
             )}
@@ -290,50 +497,142 @@ export default function ImportPage() {
           {/* Progress bar */}
           <div className="h-1.5 bg-bob-bg">
             <div
-              className="h-full bg-gradient-to-r from-bob-purple to-bob-blue transition-all duration-500"
+              className={`h-full transition-all duration-500 ${
+                queueFinished && queueErrors === 0
+                  ? "bg-gradient-to-r from-emerald-400 to-emerald-500"
+                  : "bg-gradient-to-r from-bob-purple to-bob-blue"
+              }`}
               style={{ width: `${queueTotal > 0 ? ((queueDone + queueErrors) / queueTotal) * 100 : 0}%` }}
             />
           </div>
 
-          {/* File list */}
-          <div className="divide-y divide-bob-border-light max-h-64 overflow-y-auto">
-            {queue.map((item, i) => (
-              <div key={i} className="px-5 py-3 flex items-center gap-3">
-                <div className="flex-shrink-0">
-                  {item.status === "uploading" ? (
-                    <Loader2 className="w-4 h-4 animate-spin text-bob-purple" />
-                  ) : item.status === "done" ? (
-                    <CheckCircle className="w-4 h-4 text-emerald-500" />
-                  ) : item.status === "error" ? (
-                    <AlertCircle className="w-4 h-4 text-red-500" />
-                  ) : (
-                    <FileText className="w-4 h-4 text-gray-300" />
+          {/* File list with progress */}
+          <div className="divide-y divide-bob-border-light max-h-80 overflow-y-auto">
+            {queue.map((item, i) => {
+              const audit = getAuditStatus(item);
+              return (
+                <div key={i} className="px-5 py-3 flex items-center gap-3">
+                  <div className="flex-shrink-0">
+                    {item.status === "uploading" ? (
+                      <Loader2 className="w-4 h-4 animate-spin text-bob-purple" />
+                    ) : item.status === "done" ? (
+                      <CheckCircle className="w-4 h-4 text-emerald-500" />
+                    ) : item.status === "error" ? (
+                      <AlertCircle className="w-4 h-4 text-red-500" />
+                    ) : (
+                      <FileText className="w-4 h-4 text-gray-300" />
+                    )}
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm text-bob-text truncate">{item.file.name}</p>
+                    <p className="text-xs text-bob-text-soft">
+                      {formatSize(item.file.size)}
+                      <span className="mx-1.5 text-gray-300">|</span>
+                      <span className="font-mono">{item.dateStr}</span>
+                      <span className="mx-1">→</span>
+                      <span className="font-medium">{MONTH_FULL[item.month]} {item.year}</span>
+                      {item.status === "uploading" && (
+                        <span className="text-bob-purple ml-2">Processing...</span>
+                      )}
+                      {item.status === "done" && item.result && (
+                        <span className="text-emerald-600 ml-2">
+                          {item.result.clientsProcessed} groups · {item.result.employeesProcessed.toLocaleString()} employees
+                        </span>
+                      )}
+                      {item.status === "error" && (
+                        <span className="text-red-500 ml-2">{item.error}</span>
+                      )}
+                    </p>
+                  </div>
+                  {/* Audit badge */}
+                  {item.status === "done" && (
+                    <div className="flex-shrink-0">
+                      {audit === "match" ? (
+                        <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-emerald-600 bg-emerald-50 px-2 py-1 rounded-full">
+                          <ShieldCheck className="w-3 h-3" /> Verified
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-red-600 bg-red-50 px-2 py-1 rounded-full">
+                          <AlertCircle className="w-3 h-3" /> Mismatch
+                        </span>
+                      )}
+                    </div>
                   )}
                 </div>
-                <div className="flex-1 min-w-0">
-                  <p className="text-sm text-bob-text truncate">{item.file.name}</p>
-                  <p className="text-xs text-bob-text-soft">
-                    {formatSize(item.file.size)}
-                    {item.status === "uploading" && " — Processing..."}
-                    {item.status === "done" && item.result && (
-                      <span className="text-emerald-600">
-                        {" — "}
-                        {item.result.month ? `${MONTH_FULL[item.result.month]} ` : ""}
-                        {item.result.year}
-                        {" · "}
-                        {item.result.clientsProcessed} groups
-                        {" · "}
-                        {item.result.employeesProcessed.toLocaleString()} employees
-                      </span>
-                    )}
-                    {item.status === "error" && (
-                      <span className="text-red-500">{" — "}{item.error}</span>
-                    )}
-                  </p>
-                </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
+
+          {/* ─── STEP 3: Post-upload Audit Summary ──────────────────── */}
+          {queueFinished && (
+            <div className="px-5 py-4 bg-gray-50 border-t border-bob-border">
+              <div className="flex items-center gap-2 mb-3">
+                <ShieldCheck className="w-4 h-4 text-bob-text" />
+                <h3 className="text-sm font-semibold text-bob-text">Audit Summary</h3>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="border-b border-bob-border-light">
+                      <th className="text-left py-1.5 px-2 font-medium text-bob-text-soft">Filename</th>
+                      <th className="text-left py-1.5 px-2 font-medium text-bob-text-soft">Filename Date</th>
+                      <th className="text-center py-1.5 px-2 font-medium text-bob-text-soft">→</th>
+                      <th className="text-left py-1.5 px-2 font-medium text-bob-text-soft">Stored As</th>
+                      <th className="text-center py-1.5 px-2 font-medium text-bob-text-soft">Match</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-bob-border-light">
+                    {queue.map((item, i) => {
+                      const audit = getAuditStatus(item);
+                      return (
+                        <tr key={i}>
+                          <td className="py-1.5 px-2 text-bob-text truncate max-w-[200px]">{item.file.name}</td>
+                          <td className="py-1.5 px-2 font-mono text-bob-text">
+                            {MONTH_FULL[item.month]} {item.year}
+                          </td>
+                          <td className="py-1.5 px-2 text-center text-bob-text-soft">→</td>
+                          <td className="py-1.5 px-2 font-mono text-bob-text">
+                            {item.status === "done" && item.result
+                              ? `${item.result.month ? MONTH_FULL[item.result.month] : "?"} ${item.result.year}`
+                              : item.status === "error"
+                              ? "Failed"
+                              : "—"}
+                          </td>
+                          <td className="py-1.5 px-2 text-center">
+                            {item.status === "done" ? (
+                              audit === "match" ? (
+                                <CheckCircle className="w-3.5 h-3.5 text-emerald-500 mx-auto" />
+                              ) : (
+                                <AlertCircle className="w-3.5 h-3.5 text-red-500 mx-auto" />
+                              )
+                            ) : item.status === "error" ? (
+                              <X className="w-3.5 h-3.5 text-red-400 mx-auto" />
+                            ) : null}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+              {/* Overall verdict */}
+              {queueErrors === 0 && queue.every((q) => getAuditStatus(q) === "match") ? (
+                <div className="mt-3 flex items-center gap-2 text-xs text-emerald-600 font-medium">
+                  <ShieldCheck className="w-4 h-4" />
+                  All {queueDone} files verified — filename dates match stored periods
+                </div>
+              ) : (
+                <div className="mt-3 flex items-center gap-2 text-xs text-amber-600 font-medium">
+                  <AlertCircle className="w-4 h-4" />
+                  {queueErrors > 0 ? `${queueErrors} failed. ` : ""}
+                  {queue.filter((q) => getAuditStatus(q) === "mismatch").length > 0
+                    ? "Some files have date mismatches — review above."
+                    : ""}
+                  Successful uploads: {queueDone}
+                </div>
+              )}
+            </div>
+          )}
         </div>
       )}
 
