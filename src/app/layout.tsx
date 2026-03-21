@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import "./globals.css";
 import { SideNav } from "./side-nav";
 import { MainContent } from "./main-content";
+import { UploadProvider } from "./upload-context";
 
 export const metadata: Metadata = {
   title: "AMS - Agency Management System",
@@ -16,8 +17,10 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body className="bg-bob-bg text-bob-text min-h-screen flex">
-        <SideNav />
-        <MainContent>{children}</MainContent>
+        <UploadProvider>
+          <SideNav />
+          <MainContent>{children}</MainContent>
+        </UploadProvider>
       </body>
     </html>
   );

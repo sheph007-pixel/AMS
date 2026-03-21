@@ -1,50 +1,21 @@
 "use client";
 
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useRef, useState } from "react";
 import {
   Upload, CheckCircle, AlertCircle, FileText, X,
   Loader2, ShieldCheck, ArrowRight, RefreshCw,
 } from "lucide-react";
+import { useUpload, type QueueItem } from "../upload-context";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
-
-interface Period {
-  year: number;
-  month: number;
-  groups: number;
-  benefitPlans: number;
-  employees: number;
-  importedAt: string | null;
-}
-
-interface ImportResult {
-  year: number;
-  month: number | null;
-  detectedDate: string | null;
-  clientsProcessed: number;
-  clientsCreated: number;
-  clientsUpdated: number;
-  benefitPlansCreated: number;
-  employeesProcessed: number;
-}
 
 interface StagedFile {
   file: File;
   parsedYear: number | null;
   parsedMonth: number | null;
-  dateStr: string | null;   // e.g. "20251212"
-  conflict: boolean;        // true if slot already has data
-  override: boolean;        // true if user chose to override existing data
-}
-
-interface QueueItem {
-  file: File;
-  year: number;
-  month: number;
-  dateStr: string;
-  status: "pending" | "uploading" | "done" | "error";
-  result?: ImportResult;
-  error?: string;
+  dateStr: string | null;
+  conflict: boolean;
+  override: boolean;
 }
 
 const MONTHS = [
@@ -67,9 +38,7 @@ function formatSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-/** Parse YYYYMMDD from filename like Data_API_20251212_114559_16617.xml */
 function parseDateFromFilename(filename: string): { year: number; month: number; dateStr: string } | null {
-  // Look for 8-digit date pattern YYYYMMDD
   const match = filename.match(/(\d{4})(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])/);
   if (!match) return null;
   const year = parseInt(match[1], 10);
@@ -78,72 +47,54 @@ function parseDateFromFilename(filename: string): { year: number; month: number;
   return { year, month, dateStr: `${match[1]}${match[2]}${match[3]}` };
 }
 
+function getAuditStatus(item: QueueItem): "match" | "mismatch" | "pending" {
+  if (item.status !== "done" || !item.result) return "pending";
+  if (item.year === item.result.year && item.month === item.result.month) return "match";
+  return "mismatch";
+}
+
 // ─── Main Page ────────────────────────────────────────────────────────────────
 
 export default function ImportPage() {
-  const [periods, setPeriods] = useState<Period[]>([]);
-  const [loading, setLoading] = useState(true);
+  const {
+    periods, periodsLoading, fetchPeriods, getPeriod,
+    queue, queueActive, enqueueFiles, clearQueue,
+    isSuspicious,
+  } = useUpload();
+
   const [uploading, setUploading] = useState<{ year: number; month: number } | null>(null);
   const [dragTarget, setDragTarget] = useState<{ year: number; month: number } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [pendingCell, setPendingCell] = useState<{ year: number; month: number } | null>(null);
+  const [overrideConfirm, setOverrideConfirm] = useState<{ year: number; month: number } | null>(null);
 
   // Staged files (pre-confirmation review)
   const [staged, setStaged] = useState<StagedFile[]>([]);
-  // Active upload queue (post-confirmation)
-  const [queue, setQueue] = useState<QueueItem[]>([]);
-  const [batchProcessing, setBatchProcessing] = useState(false);
   const [dragOver, setDragOver] = useState(false);
-
-  const fetchPeriods = useCallback(() => {
-    fetch("/api/import/periods")
-      .then((r) => r.json())
-      .then((data) => setPeriods(data.periods || []))
-      .finally(() => setLoading(false));
-  }, []);
-
-  useEffect(() => {
-    fetchPeriods();
-  }, [fetchPeriods]);
-
-  // Lookup: "year-month" → Period
-  const periodMap = new Map<string, Period>();
-  for (const p of periods) {
-    periodMap.set(`${p.year}-${p.month}`, p);
-  }
-
-  function getPeriod(year: number, month: number): Period | undefined {
-    return periodMap.get(`${year}-${month}`);
-  }
 
   // ─── Single cell upload ──────────────────────────────────────────────
 
   async function handleUpload(file: File, year: number, month: number) {
     setUploading({ year, month });
-
     try {
       const formData = new FormData();
       formData.append("file", file);
       formData.append("year", String(year));
       formData.append("month", String(month));
-
       const res = await fetch("/api/import", { method: "POST", body: formData });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Import failed");
       fetchPeriods();
     } catch {
-      // Cell remains empty for retry
+      // Cell remains for retry
     } finally {
       setUploading(null);
     }
   }
 
-  const [overrideConfirm, setOverrideConfirm] = useState<{ year: number; month: number } | null>(null);
-
   function handleCellClick(year: number, month: number) {
     const existing = getPeriod(year, month);
     if (existing) {
-      // Show override confirmation
       setOverrideConfirm({ year, month });
       return;
     }
@@ -155,7 +106,6 @@ export default function ImportPage() {
     if (!overrideConfirm) return;
     setPendingCell(overrideConfirm);
     setOverrideConfirm(null);
-    // Need slight delay so the ref is set before click
     setTimeout(() => fileInputRef.current?.click(), 0);
   }
 
@@ -177,7 +127,7 @@ export default function ImportPage() {
     }
   }
 
-  // ─── Staging (select files → parse dates → show for review) ──────────
+  // ─── Staging ──────────────────────────────────────────────────────────
 
   function stageFiles(files: File[]) {
     const xmlFiles = files.filter((f) => f.name.toLowerCase().endsWith(".xml"));
@@ -196,7 +146,6 @@ export default function ImportPage() {
       };
     });
 
-    // Sort by date (earliest first)
     items.sort((a, b) => {
       if (!a.dateStr) return 1;
       if (!b.dateStr) return -1;
@@ -221,20 +170,19 @@ export default function ImportPage() {
   }
 
   function confirmAndUpload() {
-    // Upload valid files: non-conflicting, or conflict with override enabled
     const valid = staged.filter(
       (s) => s.parsedYear !== null && s.parsedMonth !== null && (!s.conflict || s.override)
     );
 
-    const items: QueueItem[] = valid.map((s) => ({
-      file: s.file,
-      year: s.parsedYear!,
-      month: s.parsedMonth!,
-      dateStr: s.dateStr!,
-      status: "pending" as const,
-    }));
+    enqueueFiles(
+      valid.map((s) => ({
+        file: s.file,
+        year: s.parsedYear!,
+        month: s.parsedMonth!,
+        dateStr: s.dateStr!,
+      }))
+    );
 
-    setQueue(items);
     setStaged([]);
   }
 
@@ -248,80 +196,16 @@ export default function ImportPage() {
     (s) => s.parsedYear !== null && s.parsedMonth !== null && s.conflict && !s.override
   );
 
-  // ─── Process queue sequentially ──────────────────────────────────────
-
-  useEffect(() => {
-    if (batchProcessing) return;
-    const nextIndex = queue.findIndex((q) => q.status === "pending");
-    if (nextIndex === -1) return;
-
-    setBatchProcessing(true);
-
-    const item = queue[nextIndex];
-
-    // Mark as uploading
-    setQueue((prev) =>
-      prev.map((q, i) => (i === nextIndex ? { ...q, status: "uploading" as const } : q))
-    );
-
-    const formData = new FormData();
-    formData.append("file", item.file);
-    formData.append("year", String(item.year));
-    formData.append("month", String(item.month));
-
-    fetch("/api/import", { method: "POST", body: formData })
-      .then((res) => res.json().then((data) => ({ ok: res.ok, data })))
-      .then(({ ok, data }) => {
-        setQueue((prev) =>
-          prev.map((q, i) =>
-            i === nextIndex
-              ? ok
-                ? { ...q, status: "done" as const, result: data }
-                : { ...q, status: "error" as const, error: data.error || "Import failed" }
-              : q
-          )
-        );
-        if (ok) fetchPeriods();
-      })
-      .catch((err) => {
-        setQueue((prev) =>
-          prev.map((q, i) =>
-            i === nextIndex
-              ? { ...q, status: "error" as const, error: err instanceof Error ? err.message : "Import failed" }
-              : q
-          )
-        );
-      })
-      .finally(() => {
-        setBatchProcessing(false);
-      });
-  }, [queue, batchProcessing, fetchPeriods]);
-
-  function clearQueue() {
-    setQueue([]);
-  }
-
+  // Queue stats
   const queueDone = queue.filter((q) => q.status === "done").length;
   const queueErrors = queue.filter((q) => q.status === "error").length;
   const queueTotal = queue.length;
-  const queueActive = queue.some((q) => q.status === "pending" || q.status === "uploading");
   const queueFinished = queueTotal > 0 && !queueActive;
-
-  // ─── Audit check: compare filename date vs API response ──────────────
-
-  function getAuditStatus(item: QueueItem): "match" | "mismatch" | "pending" {
-    if (item.status !== "done" || !item.result) return "pending";
-    const filenameYear = item.year;
-    const filenameMonth = item.month;
-    const apiYear = item.result.year;
-    const apiMonth = item.result.month;
-    if (filenameYear === apiYear && filenameMonth === apiMonth) return "match";
-    return "mismatch";
-  }
 
   // Stats
   const totalUploaded = periods.length;
   const totalCells = YEARS.length * 12;
+  const suspiciousCount = periods.filter((p) => isSuspicious(p)).length;
 
   return (
     <div>
@@ -332,7 +216,7 @@ export default function ImportPage() {
         </p>
       </div>
 
-      {/* Bulk Drop Zone — multiple files */}
+      {/* Bulk Drop Zone */}
       {staged.length === 0 && !queueActive && (
         <div className="mb-6">
           <div
@@ -397,7 +281,6 @@ export default function ImportPage() {
             </p>
           </div>
 
-          {/* File mapping table */}
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead className="bg-gray-50 border-b border-bob-border-light">
@@ -484,7 +367,6 @@ export default function ImportPage() {
             </table>
           </div>
 
-          {/* Confirm / Cancel buttons */}
           <div className="px-5 py-4 bg-gray-50 border-t border-bob-border flex items-center justify-between">
             <p className="text-xs text-bob-text-soft">
               {validStaged.length} of {staged.length} file{staged.length > 1 ? "s" : ""} will be uploaded
@@ -542,10 +424,10 @@ export default function ImportPage() {
 
           {/* File list with progress */}
           <div className="divide-y divide-bob-border-light max-h-80 overflow-y-auto">
-            {queue.map((item, i) => {
+            {queue.map((item) => {
               const audit = getAuditStatus(item);
               return (
-                <div key={i} className="px-5 py-3 flex items-center gap-3">
+                <div key={item.id} className="px-5 py-3 flex items-center gap-3">
                   <div className="flex-shrink-0">
                     {item.status === "uploading" ? (
                       <Loader2 className="w-4 h-4 animate-spin text-bob-purple" />
@@ -558,19 +440,19 @@ export default function ImportPage() {
                     )}
                   </div>
                   <div className="flex-1 min-w-0">
-                    <p className="text-sm text-bob-text truncate">{item.file.name}</p>
+                    <p className="text-sm text-bob-text truncate">{item.fileName}</p>
                     <p className="text-xs text-bob-text-soft">
-                      {formatSize(item.file.size)}
+                      {formatSize(item.fileSize)}
                       <span className="mx-1.5 text-gray-300">|</span>
                       <span className="font-mono">{item.dateStr}</span>
-                      <span className="mx-1">→</span>
+                      <span className="mx-1">&rarr;</span>
                       <span className="font-medium">{MONTH_FULL[item.month]} {item.year}</span>
                       {item.status === "uploading" && (
                         <span className="text-bob-purple ml-2">Processing...</span>
                       )}
                       {item.status === "done" && item.result && (
                         <span className="text-emerald-600 ml-2">
-                          {item.result.clientsProcessed} groups · {item.result.employeesProcessed.toLocaleString()} employees
+                          {item.result.clientsProcessed} groups &middot; {item.result.employeesProcessed.toLocaleString()} employees
                         </span>
                       )}
                       {item.status === "error" && (
@@ -578,7 +460,6 @@ export default function ImportPage() {
                       )}
                     </p>
                   </div>
-                  {/* Audit badge */}
                   {item.status === "done" && (
                     <div className="flex-shrink-0">
                       {audit === "match" ? (
@@ -597,7 +478,7 @@ export default function ImportPage() {
             })}
           </div>
 
-          {/* ─── STEP 3: Post-upload Audit Summary ──────────────────── */}
+          {/* Post-upload Audit Summary */}
           {queueFinished && (
             <div className="px-5 py-4 bg-gray-50 border-t border-bob-border">
               <div className="flex items-center gap-2 mb-3">
@@ -610,21 +491,21 @@ export default function ImportPage() {
                     <tr className="border-b border-bob-border-light">
                       <th className="text-left py-1.5 px-2 font-medium text-bob-text-soft">Filename</th>
                       <th className="text-left py-1.5 px-2 font-medium text-bob-text-soft">Filename Date</th>
-                      <th className="text-center py-1.5 px-2 font-medium text-bob-text-soft">→</th>
+                      <th className="text-center py-1.5 px-2 font-medium text-bob-text-soft">&rarr;</th>
                       <th className="text-left py-1.5 px-2 font-medium text-bob-text-soft">Stored As</th>
                       <th className="text-center py-1.5 px-2 font-medium text-bob-text-soft">Match</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-bob-border-light">
-                    {queue.map((item, i) => {
+                    {queue.map((item) => {
                       const audit = getAuditStatus(item);
                       return (
-                        <tr key={i}>
-                          <td className="py-1.5 px-2 text-bob-text truncate max-w-[200px]">{item.file.name}</td>
+                        <tr key={item.id}>
+                          <td className="py-1.5 px-2 text-bob-text truncate max-w-[200px]">{item.fileName}</td>
                           <td className="py-1.5 px-2 font-mono text-bob-text">
                             {MONTH_FULL[item.month]} {item.year}
                           </td>
-                          <td className="py-1.5 px-2 text-center text-bob-text-soft">→</td>
+                          <td className="py-1.5 px-2 text-center text-bob-text-soft">&rarr;</td>
                           <td className="py-1.5 px-2 font-mono text-bob-text">
                             {item.status === "done" && item.result
                               ? `${item.result.month ? MONTH_FULL[item.result.month] : "?"} ${item.result.year}`
@@ -649,7 +530,6 @@ export default function ImportPage() {
                   </tbody>
                 </table>
               </div>
-              {/* Overall verdict */}
               {queueErrors === 0 && queue.every((q) => getAuditStatus(q) === "match") ? (
                 <div className="mt-3 flex items-center gap-2 text-xs text-emerald-600 font-medium">
                   <ShieldCheck className="w-4 h-4" />
@@ -680,10 +560,16 @@ export default function ImportPage() {
           <span className="w-3 h-3 rounded bg-bob-bg border border-bob-border inline-block" />
           Available ({totalCells - totalUploaded})
         </span>
+        {suspiciousCount > 0 && (
+          <span className="flex items-center gap-1.5">
+            <span className="w-3 h-3 rounded bg-red-100 border border-red-300 inline-block" />
+            Needs Review ({suspiciousCount})
+          </span>
+        )}
       </div>
 
       {/* Year/Month Grid */}
-      {loading ? (
+      {periodsLoading ? (
         <div className="text-center py-16 text-bob-text-soft">
           <Loader2 className="w-8 h-8 animate-spin mx-auto mb-3 text-bob-purple" />
           Loading data periods...
@@ -709,6 +595,7 @@ export default function ImportPage() {
                       const isUploading = uploading?.year === year && uploading?.month === month;
                       const isDragOver = dragTarget?.year === year && dragTarget?.month === month;
                       const hasData = !!period;
+                      const suspicious = hasData && isSuspicious(period);
 
                       return (
                         <td key={month} className="px-1 py-2">
@@ -721,7 +608,9 @@ export default function ImportPage() {
                             onDragLeave={() => setDragTarget(null)}
                             onDrop={(e) => handleCellDrop(e, year, month)}
                             className={`group relative rounded-lg px-2 py-2.5 text-center transition-all duration-200 min-h-[52px] flex flex-col items-center justify-center cursor-pointer ${
-                              hasData
+                              suspicious
+                                ? "bg-red-50 border border-red-300 hover:border-red-400 hover:bg-red-50/80"
+                                : hasData
                                 ? "bg-emerald-50 border border-emerald-200 hover:border-bob-purple/40 hover:bg-emerald-50/60"
                                 : isUploading
                                 ? "bg-bob-purple-light border border-bob-purple/30"
@@ -730,13 +619,21 @@ export default function ImportPage() {
                                 : "bg-bob-bg/50 border border-dashed border-bob-border hover:border-bob-purple/40 hover:bg-bob-purple-light/20"
                             }`}
                             title={
-                              hasData
+                              suspicious
+                                ? `Needs review — only ${period.groups} group${period.groups !== 1 ? "s" : ""}, ${period.employees.toLocaleString()} employees\nMay be incomplete or failed upload\nClick to re-upload`
+                                : hasData
                                 ? `${period.groups} groups, ${period.employees.toLocaleString()} employees\nUploaded: ${period.importedAt ? new Date(period.importedAt).toLocaleDateString() : "—"}\nClick to replace`
                                 : `Upload ${MONTH_FULL[month]} ${year}`
                             }
                           >
                             {isUploading ? (
                               <Loader2 className="w-4 h-4 animate-spin text-bob-purple" />
+                            ) : suspicious ? (
+                              <>
+                                <AlertCircle className="w-3.5 h-3.5 text-red-500 mb-0.5 group-hover:hidden" />
+                                <RefreshCw className="w-3.5 h-3.5 text-red-500 mb-0.5 hidden group-hover:block" />
+                                <span className="text-[10px] font-semibold text-red-600">{period.groups}</span>
+                              </>
                             ) : hasData ? (
                               <>
                                 <CheckCircle className="w-3.5 h-3.5 text-emerald-500 mb-0.5 group-hover:hidden" />
@@ -761,35 +658,44 @@ export default function ImportPage() {
       {/* Override Confirmation Modal */}
       {overrideConfirm && (() => {
         const p = getPeriod(overrideConfirm.year, overrideConfirm.month);
+        const susp = p && isSuspicious(p);
         return (
           <div className="fixed inset-0 z-[100] flex items-center justify-center">
             <div className="absolute inset-0 bg-black/30 backdrop-blur-sm" onClick={() => setOverrideConfirm(null)} />
             <div className="relative bg-white rounded-2xl shadow-2xl p-6 w-[380px] animate-fade-in-up">
               <div className="text-center mb-5">
-                <div className="w-12 h-12 rounded-2xl bg-amber-50 flex items-center justify-center mx-auto mb-3">
-                  <RefreshCw className="w-6 h-6 text-amber-500" />
+                <div className={`w-12 h-12 rounded-2xl flex items-center justify-center mx-auto mb-3 ${susp ? "bg-red-50" : "bg-amber-50"}`}>
+                  <RefreshCw className={`w-6 h-6 ${susp ? "text-red-500" : "text-amber-500"}`} />
                 </div>
-                <h3 className="text-lg font-semibold text-bob-text">Replace Existing Data?</h3>
+                <h3 className="text-lg font-semibold text-bob-text">
+                  {susp ? "Replace Incomplete Data?" : "Replace Existing Data?"}
+                </h3>
                 <p className="text-sm text-bob-text-soft mt-1">
-                  <strong>{MONTH_FULL[overrideConfirm.month]} {overrideConfirm.year}</strong> already has data.
+                  <strong>{MONTH_FULL[overrideConfirm.month]} {overrideConfirm.year}</strong>
+                  {susp ? " appears incomplete." : " already has data."}
                 </p>
               </div>
 
               {p && (
-                <div className="bg-bob-bg rounded-xl p-3 mb-5 text-sm">
+                <div className={`rounded-xl p-3 mb-5 text-sm ${susp ? "bg-red-50" : "bg-bob-bg"}`}>
                   <div className="flex justify-between text-bob-text-soft">
                     <span>Groups</span>
-                    <span className="font-medium text-bob-text">{p.groups}</span>
+                    <span className={`font-medium ${susp ? "text-red-600" : "text-bob-text"}`}>{p.groups}</span>
                   </div>
                   <div className="flex justify-between text-bob-text-soft mt-1">
                     <span>Employees</span>
-                    <span className="font-medium text-bob-text">{p.employees.toLocaleString()}</span>
+                    <span className={`font-medium ${susp ? "text-red-600" : "text-bob-text"}`}>{p.employees.toLocaleString()}</span>
                   </div>
                   {p.importedAt && (
                     <div className="flex justify-between text-bob-text-soft mt-1">
                       <span>Uploaded</span>
                       <span className="font-medium text-bob-text">{new Date(p.importedAt).toLocaleDateString()}</span>
                     </div>
+                  )}
+                  {susp && (
+                    <p className="text-xs text-red-500 mt-2 pt-2 border-t border-red-200">
+                      This looks like an incomplete upload — group count is much lower than neighboring months.
+                    </p>
                   )}
                 </div>
               )}
