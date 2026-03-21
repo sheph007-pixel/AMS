@@ -1,7 +1,8 @@
 "use client";
 
 import { usePathname, useRouter } from "next/navigation";
-import { useState, useEffect, useRef, createContext, useContext } from "react";
+import { useState, useEffect, createContext, useContext } from "react";
+import { PinModal } from "./pin-modal";
 
 // ─── Sidebar context for layout ──────────────────────────────────────────────
 
@@ -72,10 +73,7 @@ export function SideNav() {
   const [collapsed, setCollapsed] = useState(false);
   const [adminUnlocked, setAdminUnlocked] = useState(false);
   const [showPinModal, setShowPinModal] = useState(false);
-  const [pinValue, setPinValue] = useState("");
-  const [pinError, setPinError] = useState(false);
   const [pendingHref, setPendingHref] = useState<string | null>(null);
-  const pinInputRef = useRef<HTMLInputElement>(null);
 
   // Load collapsed state from localStorage
   useEffect(() => {
@@ -104,27 +102,6 @@ export function SideNav() {
     }
     setPendingHref(href);
     setShowPinModal(true);
-    setPinValue("");
-    setPinError(false);
-    setTimeout(() => pinInputRef.current?.focus(), 100);
-  }
-
-  function handlePinSubmit() {
-    if (pinValue === ADMIN_PIN) {
-      setAdminUnlocked(true);
-      sessionStorage.setItem("admin-unlocked", "true");
-      setShowPinModal(false);
-      setPinValue("");
-      setPinError(false);
-      if (pendingHref) {
-        router.push(pendingHref);
-        setPendingHref(null);
-      }
-    } else {
-      setPinError(true);
-      setPinValue("");
-      pinInputRef.current?.focus();
-    }
   }
 
   function lockAdmin() {
@@ -302,66 +279,22 @@ export function SideNav() {
 
       {/* PIN Modal */}
       {showPinModal && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center">
-          {/* Backdrop */}
-          <div
-            className="absolute inset-0 bg-black/40 backdrop-blur-sm"
-            onClick={() => { setShowPinModal(false); setPendingHref(null); }}
-          />
-          {/* Modal */}
-          <div className="relative bg-white rounded-2xl shadow-2xl p-6 w-80 animate-fade-in-up">
-            <div className="text-center mb-5">
-              <div className="w-12 h-12 rounded-full bg-bob-purple-light flex items-center justify-center mx-auto mb-3">
-                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#7C5CFC" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
-                  <path d="M7 11V7a5 5 0 0 1 10 0v4" />
-                </svg>
-              </div>
-              <h3 className="text-lg font-semibold text-bob-text">Admin Access</h3>
-              <p className="text-xs text-bob-text-soft mt-1">Enter PIN to access admin features</p>
-            </div>
-            <form
-              onSubmit={(e) => { e.preventDefault(); handlePinSubmit(); }}
-            >
-              <input
-                ref={pinInputRef}
-                type="password"
-                inputMode="numeric"
-                maxLength={4}
-                value={pinValue}
-                onChange={(e) => {
-                  setPinValue(e.target.value.replace(/\D/g, ""));
-                  setPinError(false);
-                }}
-                placeholder="Enter 4-digit PIN"
-                className={`w-full text-center text-2xl tracking-[0.5em] font-mono py-3 rounded-xl border-2 transition-colors outline-none ${
-                  pinError
-                    ? "border-red-300 bg-red-50 text-red-600"
-                    : "border-bob-border focus:border-bob-purple bg-bob-bg"
-                }`}
-                autoFocus
-              />
-              {pinError && (
-                <p className="text-xs text-red-500 text-center mt-2">Incorrect PIN. Try again.</p>
-              )}
-              <button
-                type="submit"
-                disabled={pinValue.length < 4}
-                className="w-full mt-4 py-2.5 rounded-xl bg-bob-purple text-white text-sm font-semibold hover:bg-bob-purple/90 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-              >
-                Unlock
-              </button>
-            </form>
-            <button
-              onClick={() => { setShowPinModal(false); setPendingHref(null); }}
-              className="absolute top-3 right-3 text-gray-300 hover:text-gray-500 transition-colors"
-            >
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M18 6L6 18M6 6l12 12" />
-              </svg>
-            </button>
-          </div>
-        </div>
+        <PinModal
+          onSubmit={(pin) => {
+            if (pin === ADMIN_PIN) {
+              setAdminUnlocked(true);
+              sessionStorage.setItem("admin-unlocked", "true");
+              setShowPinModal(false);
+              if (pendingHref) {
+                router.push(pendingHref);
+                setPendingHref(null);
+              }
+              return true;
+            }
+            return false;
+          }}
+          onCancel={() => { setShowPinModal(false); setPendingHref(null); }}
+        />
       )}
     </>
   );
