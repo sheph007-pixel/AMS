@@ -37,12 +37,13 @@ function getField(obj: any, ...keys: string[]): string | null {
   return null;
 }
 
-function qualifyEnrollment(enrollment: any): boolean {
+function qualifyEnrollment(enrollment: any, snapshotMonthStart?: Date): boolean {
   const enrollmentType = getField(enrollment, "EnrollmentType", "enrollmentType", "Type");
   if (enrollmentType) return enrollmentType.toLowerCase() === "current";
   const declineReason = getField(enrollment, "DeclineReason", "declineReason");
   const endDate = getField(enrollment, "CoverageEndDate", "EndDate", "EndedOn");
-  const isEnded = endDate && new Date(endDate) <= new Date();
+  const compareDate = snapshotMonthStart || new Date();
+  const isEnded = endDate && new Date(endDate) < compareDate;
   return !declineReason && !isEnded;
 }
 
@@ -644,6 +645,7 @@ async function buildProductionDashboard(): Promise<any> {
     if (isExcluded({ groupName: snap.client.groupName }, exclusionRules)) continue;
 
     const period = `${snap.year}-${String(snap.month).padStart(2, "0")}`;
+    const snapshotMonthStart = new Date(snap.year, snap.month - 1, 1);
 
     // Build plan lookup
     const planIdMap = new Map<string, { carrier: string; planType: string; planName: string; policyNumber: string }>();
@@ -697,7 +699,7 @@ async function buildProductionDashboard(): Promise<any> {
       const seen = new Set<string>();
 
       for (const enrollment of enrollments) {
-        if (!qualifyEnrollment(enrollment)) continue;
+        if (!qualifyEnrollment(enrollment, snapshotMonthStart)) continue;
 
         const enrollPlanId = getField(enrollment, "PlanIdentifier", "PlanId", "PlanID") || "";
         const enrollPlanName = getField(enrollment, "PlanName", "Plan", "Name") || "";

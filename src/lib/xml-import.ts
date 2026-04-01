@@ -185,7 +185,7 @@ export async function importAnnualXml(
     });
 
     // --- Count active enrolled per plan + sum enrollment-level MonthlyPlanCost ---
-    const { enrolled: enrolledByPlan, eligible: eligibleByPlan, premiumByPlan } = countByPlan(employees);
+    const { enrolled: enrolledByPlan, eligible: eligibleByPlan, premiumByPlan } = countByPlan(employees, resolvedYear, resolvedMonth ?? 1);
 
     // --- Import benefit plans (filtered by exclusion rules) ---
     for (const plan of plans) {
@@ -483,7 +483,7 @@ function isExcluded(
  * - Premium: sum of PlanCost from ALL qualifying enrollment rows (row-level, not deduped)
  * - PlanCost = total monthly premium as billed by carrier (employee + dependents)
  */
-function countByPlan(employees: any[]): {
+function countByPlan(employees: any[], year: number, month: number): {
   enrolled: Map<string, number>;
   eligible: Map<string, number>;
   premiumByPlan: Map<string, number>;
@@ -529,7 +529,8 @@ function countByPlan(employees: any[]): {
         // EnrollmentType not present — fall back to decline/end check
         const declineReason = extractField(enrollment, "DeclineReason");
         const endDate = extractField(enrollment, "CoverageEndDate", "EndDate", "EndedOn");
-        const isEnded = endDate && new Date(endDate) <= new Date();
+        const snapshotMonthStart = new Date(year, month - 1, 1);
+        const isEnded = endDate && new Date(endDate) < snapshotMonthStart;
         isQualifying = !declineReason && !isEnded;
       }
 
