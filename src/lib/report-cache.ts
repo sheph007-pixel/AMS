@@ -28,12 +28,21 @@ function findEnrollments(meta: any): any[] {
   return [];
 }
 
+function getField(obj: any, ...keys: string[]): string | null {
+  if (!obj || typeof obj !== "object") return null;
+  for (const key of keys) {
+    if (obj[key] !== undefined && obj[key] !== null && obj[key] !== "") return String(obj[key]);
+    if (obj[`@_${key}`] !== undefined && obj[`@_${key}`] !== null) return String(obj[`@_${key}`]);
+  }
+  return null;
+}
+
 function qualifyEnrollment(enrollment: any): boolean {
-  const enrollmentType = enrollment.EnrollmentType || enrollment.enrollmentType || enrollment.Type;
-  if (enrollmentType) return String(enrollmentType).toLowerCase() === "current";
-  const declineReason = enrollment.DeclineReason || enrollment.declineReason;
-  const endDate = enrollment.CoverageEndDate || enrollment.EndDate || enrollment.EndedOn;
-  const isEnded = endDate && new Date(String(endDate)) <= new Date();
+  const enrollmentType = getField(enrollment, "EnrollmentType", "enrollmentType", "Type");
+  if (enrollmentType) return enrollmentType.toLowerCase() === "current";
+  const declineReason = getField(enrollment, "DeclineReason", "declineReason");
+  const endDate = getField(enrollment, "CoverageEndDate", "EndDate", "EndedOn");
+  const isEnded = endDate && new Date(endDate) <= new Date();
   return !declineReason && !isEnded;
 }
 
@@ -42,8 +51,8 @@ function resolvePlan(
   planIdMap: Map<string, { carrier: string; planType: string; planName: string }>,
   planNameMap: Map<string, { carrier: string; planType: string; planName: string }>
 ) {
-  const enrollPlanId = String(enrollment.PlanIdentifier || enrollment.PlanId || enrollment.PlanID || "");
-  const enrollPlanName = String(enrollment.PlanName || enrollment.Plan || enrollment.Name || "");
+  const enrollPlanId = getField(enrollment, "PlanIdentifier", "PlanId", "PlanID") || "";
+  const enrollPlanName = getField(enrollment, "PlanName", "Plan", "Name") || "";
   if (enrollPlanId) {
     const info = planIdMap.get(enrollPlanId);
     if (info) return info;
@@ -55,10 +64,13 @@ function resolvePlan(
 }
 
 function getPremium(enrollment: any): number {
-  const raw = String(enrollment.PlanCost || enrollment.MonthlyPlanCost || "");
+  const raw = getField(enrollment,
+    "PlanCost", "MonthlyPlanCost", "TotalPremium", "Premium",
+    "MonthlyPremium", "TotalMonthlyPremium", "Cost", "Rate"
+  );
   if (!raw) return 0;
   const v = parseFloat(raw);
-  return isNaN(v) ? 0 : v;
+  return isNaN(v) || v <= 0 ? 0 : v;
 }
 
 // ─── Core Data Processing ────────────────────────────────────────────────────
