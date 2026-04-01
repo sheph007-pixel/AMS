@@ -47,6 +47,22 @@ function qualifyEnrollment(enrollment: any, snapshotMonthStart?: Date): boolean 
   return !declineReason && !isEnded;
 }
 
+function getEnrollee(enrollment: any): any {
+  const container = enrollment.Enrollees || enrollment.enrollees;
+  if (!container) return null;
+  const list = container.Enrollee || container.enrollee;
+  if (Array.isArray(list)) return list[0] || null;
+  if (list && typeof list === "object") return list;
+  return null;
+}
+
+function getEnrollmentField(enrollment: any, enrollee: any, ...keys: string[]): string | null {
+  const top = getField(enrollment, ...keys);
+  if (top) return top;
+  if (enrollee) return getField(enrollee, ...keys);
+  return null;
+}
+
 function resolvePlan(
   enrollment: any,
   planIdMap: Map<string, { carrier: string; planType: string; planName: string }>,
@@ -701,8 +717,10 @@ async function buildProductionDashboard(): Promise<any> {
       for (const enrollment of enrollments) {
         if (!qualifyEnrollment(enrollment, snapshotMonthStart)) continue;
 
-        const enrollPlanId = getField(enrollment, "PlanIdentifier", "PlanId", "PlanID") || "";
-        const enrollPlanName = getField(enrollment, "PlanName", "Plan", "Name") || "";
+        const enrollee = getEnrollee(enrollment);
+
+        const enrollPlanId = getEnrollmentField(enrollment, enrollee, "PlanIdentifier", "PlanId", "PlanID") || "";
+        const enrollPlanName = getEnrollmentField(enrollment, enrollee, "PlanName", "Plan", "Name") || "";
         const planKey = enrollPlanId || enrollPlanName;
         if (!planKey) continue;
 
@@ -711,7 +729,7 @@ async function buildProductionDashboard(): Promise<any> {
           || null;
         if (!planInfo) continue;
 
-        const coverageTier = getField(enrollment,
+        const coverageTier = getEnrollmentField(enrollment, enrollee,
           "CoverageLevel", "Tier", "CoverageTier", "CoverageDescription",
           "TierName", "RateTier", "AgeBand"
         ) || "Employee";
@@ -721,7 +739,7 @@ async function buildProductionDashboard(): Promise<any> {
         seen.add(dedupeKey);
 
         const planCost = (() => {
-          const raw = getField(enrollment,
+          const raw = getEnrollmentField(enrollment, enrollee,
             "PlanCost", "MonthlyPlanCost", "TotalPremium", "Premium",
             "MonthlyPremium", "TotalMonthlyPremium", "Cost");
           if (!raw) return 0;
@@ -730,7 +748,7 @@ async function buildProductionDashboard(): Promise<any> {
         })();
 
         const rate = (() => {
-          const raw = getField(enrollment,
+          const raw = getEnrollmentField(enrollment, enrollee,
             "Rate", "EmployeeRate", "MonthlyRate", "PlanRate", "TierRate",
             "PlanCost", "MonthlyPlanCost", "Premium");
           if (!raw) return 0;
@@ -739,7 +757,7 @@ async function buildProductionDashboard(): Promise<any> {
         })();
 
         const benefitAmt = (() => {
-          const raw = getField(enrollment,
+          const raw = getEnrollmentField(enrollment, enrollee,
             "BenefitAmount", "CoverageAmount", "Volume", "Amount",
             "FaceAmount", "BenefitVolume", "ApprovedAmount");
           if (!raw) return 0;
