@@ -629,11 +629,11 @@ function buildBenefitsReport(snapshots: ProcessedSnapshot[]) {
 async function buildProductionDashboard(): Promise<any> {
   const exclusionRules = await getExclusionRules();
 
-  // Load carrier settings
+  // Load carrier settings (includes exclusion flag)
   const carrierSettings = await prisma.carrierSetting.findMany();
-  const csMap = new Map<string, { incomeMethod: string; rate: number }>();
+  const csMap = new Map<string, { incomeMethod: string; rate: number; excluded: boolean }>();
   for (const cs of carrierSettings) {
-    csMap.set(cs.carrierName.toLowerCase(), { incomeMethod: cs.incomeMethod, rate: cs.rate });
+    csMap.set(cs.carrierName.toLowerCase(), { incomeMethod: cs.incomeMethod, rate: cs.rate, excluded: cs.excluded });
   }
 
   // Load lightweight snapshot list (NO employee data yet)
@@ -671,6 +671,8 @@ async function buildProductionDashboard(): Promise<any> {
     for (const bp of snap.benefitPlans) {
       if (isExcluded({ carrier: bp.carrier, planName: bp.planName, planType: bp.planType }, exclusionRules)) continue;
       if (bp.planType?.toLowerCase() === "cobra") continue;
+      // Check carrier exclusion from CarrierSetting
+      if (bp.carrier && csMap.get(bp.carrier.toLowerCase())?.excluded) continue;
 
       let planMeta: any = {};
       try { planMeta = bp.metadata ? JSON.parse(bp.metadata) : {}; } catch { /* */ }
@@ -858,6 +860,7 @@ async function buildProductionDashboard(): Promise<any> {
     carrierSettings: carrierSettings.map(cs => ({
       id: cs.id, carrierName: cs.carrierName,
       incomeMethod: cs.incomeMethod, rate: cs.rate,
+      excluded: cs.excluded,
     })),
   };
 }

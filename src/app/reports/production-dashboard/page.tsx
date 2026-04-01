@@ -3,7 +3,7 @@
 import { useEffect, useState, useMemo, useRef, useCallback } from "react";
 import {
   Download, Search, ArrowUpDown, ArrowUp, ArrowDown,
-  Settings2, Save, Plus, Trash2, X, ChevronDown,
+  Settings2, Save, X, ChevronDown,
 } from "lucide-react";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -56,6 +56,7 @@ interface CarrierSetting {
   carrierName: string;
   incomeMethod: string;
   rate: number;
+  excluded: boolean;
 }
 
 type SortKey = keyof Pick<Row,
@@ -192,27 +193,41 @@ function FilterDropdown({
 // ─── Carrier Settings Panel ──────────────────────────────────────────────────
 
 function CarrierSettingsPanel({
-  settings, onSave, onDelete,
+  settings, onSave,
 }: {
   settings: CarrierSetting[];
-  onSave: (s: { carrierName: string; incomeMethod: string; rate: number }) => Promise<void>;
-  onDelete: (id: string) => Promise<void>;
+  onSave: (s: { carrierName: string; incomeMethod: string; rate: number; excluded: boolean }) => Promise<void>;
 }) {
   const [open, setOpen] = useState(false);
-  const [editRow, setEditRow] = useState<{ carrierName: string; incomeMethod: string; rate: string } | null>(null);
-  const [saving, setSaving] = useState(false);
+  const [editIdx, setEditIdx] = useState<number | null>(null);
+  const [editRow, setEditRow] = useState<{ incomeMethod: string; rate: string; excluded: boolean }>({ incomeMethod: "NONE", rate: "0", excluded: false });
+  const [saving, setSaving] = useState<string | null>(null);
 
-  async function handleSave() {
-    if (!editRow?.carrierName) return;
-    setSaving(true);
+  function startEdit(s: CarrierSetting, idx: number) {
+    setEditIdx(idx);
+    setEditRow({ incomeMethod: s.incomeMethod, rate: String(s.rate), excluded: s.excluded });
+  }
+
+  async function handleSave(carrierName: string) {
+    setSaving(carrierName);
     await onSave({
-      carrierName: editRow.carrierName,
+      carrierName,
       incomeMethod: editRow.incomeMethod,
       rate: parseFloat(editRow.rate) || 0,
+      excluded: editRow.excluded,
     });
-    setEditRow(null);
-    setSaving(false);
+    setEditIdx(null);
+    setSaving(null);
   }
+
+  async function toggleExclude(s: CarrierSetting) {
+    setSaving(s.carrierName);
+    await onSave({ carrierName: s.carrierName, incomeMethod: s.incomeMethod, rate: s.rate, excluded: !s.excluded });
+    setSaving(null);
+  }
+
+  const activeCount = settings.filter(s => !s.excluded).length;
+  const excludedCount = settings.filter(s => s.excluded).length;
 
   return (
     <div className="bg-white rounded-2xl border border-bob-border overflow-hidden mb-6">
@@ -223,7 +238,9 @@ function CarrierSettingsPanel({
         <div className="flex items-center gap-2">
           <Settings2 className="w-4 h-4 text-bob-text-soft" />
           <span className="text-sm font-semibold text-bob-text">Carrier Settings</span>
-          <span className="text-xs text-bob-text-soft">({settings.length} configured)</span>
+          <span className="text-xs text-bob-text-soft">
+            {activeCount} active{excludedCount > 0 && <>, <span className="text-red-400">{excludedCount} excluded</span></>}
+          </span>
         </div>
         <ChevronDown className={`w-4 h-4 text-gray-400 transition-transform ${open ? "rotate-180" : ""}`} />
       </button>
@@ -231,87 +248,94 @@ function CarrierSettingsPanel({
       {open && (
         <div className="border-t border-bob-border px-5 py-4">
           <p className="text-xs text-bob-text-soft mb-4">
-            Each carrier uses one income method: PEPM ($ per employee per month), PERCENT_PREMIUM (% of premium), or NONE.
+            All carriers from EN XML data. Set income method and rate, or exclude from reports.
           </p>
-          <table className="w-full text-sm mb-4">
+          <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-bob-border">
                 <th className="text-left py-2 px-2 text-xs font-semibold text-bob-text-soft">Carrier</th>
+                <th className="text-center py-2 px-2 text-xs font-semibold text-bob-text-soft w-20">Status</th>
                 <th className="text-left py-2 px-2 text-xs font-semibold text-bob-text-soft">Method</th>
                 <th className="text-left py-2 px-2 text-xs font-semibold text-bob-text-soft">Rate</th>
-                <th className="text-right py-2 px-2 text-xs font-semibold text-bob-text-soft w-20">Actions</th>
+                <th className="text-right py-2 px-2 text-xs font-semibold text-bob-text-soft w-20"></th>
               </tr>
             </thead>
             <tbody className="divide-y divide-bob-border-light">
-              {settings.map(s => (
-                <tr key={s.id} className="hover:bg-gray-50">
-                  <td className="py-2 px-2 font-medium text-bob-text">{s.carrierName}</td>
-                  <td className="py-2 px-2">
-                    <span className={`inline-flex items-center px-2 py-0.5 text-xs font-medium rounded-full ${
-                      s.incomeMethod === "PEPM" ? "bg-blue-50 text-blue-700" :
-                      s.incomeMethod === "PERCENT_PREMIUM" ? "bg-purple-50 text-purple-700" :
-                      "bg-gray-100 text-gray-500"
-                    }`}>{s.incomeMethod}</span>
-                  </td>
-                  <td className="py-2 px-2 text-bob-text">
-                    {s.incomeMethod === "PEPM" ? `$${s.rate}` :
-                     s.incomeMethod === "PERCENT_PREMIUM" ? `${s.rate}%` : "\u2014"}
-                  </td>
-                  <td className="py-2 px-2 text-right">
-                    <button onClick={() => setEditRow({ carrierName: s.carrierName, incomeMethod: s.incomeMethod, rate: String(s.rate) })}
-                      className="text-xs text-bob-purple hover:underline mr-2">Edit</button>
-                    <button onClick={() => onDelete(s.id)} className="text-xs text-red-400 hover:text-red-600">
-                      <Trash2 className="w-3.5 h-3.5 inline" />
-                    </button>
-                  </td>
-                </tr>
-              ))}
+              {settings.map((s, idx) => {
+                const isEditing = editIdx === idx;
+                const isSaving = saving === s.carrierName;
+
+                return (
+                  <tr key={s.id} className={`transition-colors ${s.excluded ? "opacity-50 bg-red-50/30" : "hover:bg-gray-50"}`}>
+                    <td className="py-2.5 px-2 font-medium text-bob-text">
+                      {s.carrierName}
+                      {s.excluded && <span className="ml-2 text-[10px] text-red-400 font-semibold uppercase">Excluded</span>}
+                    </td>
+                    <td className="py-2.5 px-2 text-center">
+                      <button
+                        onClick={() => toggleExclude(s)}
+                        disabled={!!isSaving}
+                        className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${
+                          s.excluded ? "bg-red-300" : "bg-green-400"
+                        }`}
+                        title={s.excluded ? "Click to include" : "Click to exclude"}
+                      >
+                        <span className={`inline-block h-3.5 w-3.5 rounded-full bg-white transition-transform ${
+                          s.excluded ? "translate-x-1" : "translate-x-[18px]"
+                        }`} />
+                      </button>
+                    </td>
+                    {isEditing ? (
+                      <>
+                        <td className="py-2.5 px-2">
+                          <select value={editRow.incomeMethod}
+                            onChange={e => setEditRow({ ...editRow, incomeMethod: e.target.value })}
+                            className="border border-bob-border rounded-lg px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-bob-purple/20">
+                            <option value="PEPM">PEPM</option>
+                            <option value="PERCENT_PREMIUM">PERCENT_PREMIUM</option>
+                            <option value="NONE">NONE</option>
+                          </select>
+                        </td>
+                        <td className="py-2.5 px-2">
+                          <input type="number" step="0.01" value={editRow.rate}
+                            onChange={e => setEditRow({ ...editRow, rate: e.target.value })}
+                            className="w-20 border border-bob-border rounded-lg px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-bob-purple/20" />
+                        </td>
+                        <td className="py-2.5 px-2 text-right">
+                          <button onClick={() => handleSave(s.carrierName)} disabled={!!isSaving}
+                            className="text-xs text-white bg-bob-purple px-2.5 py-1 rounded-lg hover:bg-bob-purple/90 mr-1">
+                            {isSaving ? "..." : "Save"}
+                          </button>
+                          <button onClick={() => setEditIdx(null)} className="text-xs text-gray-400 hover:text-gray-600">Cancel</button>
+                        </td>
+                      </>
+                    ) : (
+                      <>
+                        <td className="py-2.5 px-2">
+                          <span className={`inline-flex items-center px-2 py-0.5 text-xs font-medium rounded-full ${
+                            s.incomeMethod === "PEPM" ? "bg-blue-50 text-blue-700" :
+                            s.incomeMethod === "PERCENT_PREMIUM" ? "bg-purple-50 text-purple-700" :
+                            "bg-gray-100 text-gray-500"
+                          }`}>{s.incomeMethod}</span>
+                        </td>
+                        <td className="py-2.5 px-2 text-bob-text tabular-nums">
+                          {s.incomeMethod === "PEPM" ? `$${s.rate}` :
+                           s.incomeMethod === "PERCENT_PREMIUM" ? `${s.rate}%` : "\u2014"}
+                        </td>
+                        <td className="py-2.5 px-2 text-right">
+                          <button onClick={() => startEdit(s, idx)}
+                            className="text-xs text-bob-purple hover:underline">Edit</button>
+                        </td>
+                      </>
+                    )}
+                  </tr>
+                );
+              })}
               {settings.length === 0 && (
-                <tr><td colSpan={4} className="py-4 text-center text-bob-text-soft text-xs">No carrier settings configured</td></tr>
+                <tr><td colSpan={5} className="py-4 text-center text-bob-text-soft text-xs">No carriers found in data</td></tr>
               )}
             </tbody>
           </table>
-
-          {editRow ? (
-            <div className="flex items-end gap-3 bg-gray-50 rounded-xl p-3">
-              <div className="flex-1">
-                <label className="text-[10px] font-semibold text-bob-text-soft uppercase">Carrier</label>
-                <input type="text" value={editRow.carrierName}
-                  onChange={e => setEditRow({ ...editRow, carrierName: e.target.value })}
-                  className="w-full border border-bob-border rounded-lg px-3 py-1.5 text-sm mt-1 focus:outline-none focus:ring-2 focus:ring-bob-purple/20"
-                  placeholder="e.g. Guardian" />
-              </div>
-              <div className="w-48">
-                <label className="text-[10px] font-semibold text-bob-text-soft uppercase">Method</label>
-                <select value={editRow.incomeMethod}
-                  onChange={e => setEditRow({ ...editRow, incomeMethod: e.target.value })}
-                  className="w-full border border-bob-border rounded-lg px-3 py-1.5 text-sm mt-1 focus:outline-none focus:ring-2 focus:ring-bob-purple/20">
-                  <option value="PEPM">PEPM</option>
-                  <option value="PERCENT_PREMIUM">PERCENT_PREMIUM</option>
-                  <option value="NONE">NONE</option>
-                </select>
-              </div>
-              <div className="w-28">
-                <label className="text-[10px] font-semibold text-bob-text-soft uppercase">Rate</label>
-                <input type="number" step="0.01" value={editRow.rate}
-                  onChange={e => setEditRow({ ...editRow, rate: e.target.value })}
-                  className="w-full border border-bob-border rounded-lg px-3 py-1.5 text-sm mt-1 focus:outline-none focus:ring-2 focus:ring-bob-purple/20"
-                  placeholder="e.g. 20" />
-              </div>
-              <button onClick={handleSave} disabled={saving || !editRow.carrierName}
-                className="px-4 py-1.5 bg-bob-purple text-white text-sm font-medium rounded-lg hover:bg-bob-purple/90 disabled:opacity-50 transition-colors flex items-center gap-1.5">
-                <Save className="w-3.5 h-3.5" /> {saving ? "..." : "Save"}
-              </button>
-              <button onClick={() => setEditRow(null)} className="p-1.5 text-gray-400 hover:text-gray-600">
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-          ) : (
-            <button onClick={() => setEditRow({ carrierName: "", incomeMethod: "PEPM", rate: "0" })}
-              className="inline-flex items-center gap-1.5 text-xs text-bob-purple font-medium hover:underline">
-              <Plus className="w-3.5 h-3.5" /> Add Carrier Setting
-            </button>
-          )}
         </div>
       )}
     </div>
@@ -421,12 +445,8 @@ export default function ProductionDashboardPage() {
       : <ArrowDown className="w-3 h-3 text-bob-purple ml-0.5 inline" />;
   }
 
-  async function handleSaveSetting(s: { carrierName: string; incomeMethod: string; rate: number }) {
+  async function handleSaveSetting(s: { carrierName: string; incomeMethod: string; rate: number; excluded: boolean }) {
     await fetch("/api/carrier-settings", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(s) });
-    loadData();
-  }
-  async function handleDeleteSetting(id: string) {
-    await fetch(`/api/carrier-settings?id=${id}`, { method: "DELETE" });
     loadData();
   }
 
@@ -483,7 +503,7 @@ export default function ProductionDashboardPage() {
 
       {/* Carrier Settings */}
       {!loading && (
-        <CarrierSettingsPanel settings={carrierSettings} onSave={handleSaveSetting} onDelete={handleDeleteSetting} />
+        <CarrierSettingsPanel settings={carrierSettings} onSave={handleSaveSetting} />
       )}
 
       {/* Filters */}
