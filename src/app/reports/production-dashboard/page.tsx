@@ -590,10 +590,10 @@ export default function ProductionDashboardPage() {
                     <tr key={`${row.month}-${row.clientCode}-${row.policyNumber}-${row.planName}-${row.grouping}-${i}`}
                       className="hover:bg-bob-bg/50 transition-colors duration-100">
                       <td className="px-4 py-2.5 text-bob-text font-medium text-xs">{fmtMonth(row.month)}</td>
-                      <td className="px-4 py-2.5 text-bob-text font-medium max-w-[180px] truncate" title={row.clientName}>{row.clientName}</td>
+                      <td className="px-4 py-2.5 text-bob-text font-medium max-w-[260px] truncate" title={row.clientName}>{row.clientName}</td>
                       <td className="px-4 py-2.5 text-bob-text text-xs">{row.carrier}</td>
                       <td className="px-4 py-2.5 text-bob-text-soft font-mono text-xs">{row.policyNumber || "\u2014"}</td>
-                      <td className="px-4 py-2.5 text-bob-text text-xs max-w-[180px] truncate" title={row.planName}>{row.planName || "\u2014"}</td>
+                      <td className="px-4 py-2.5 text-bob-text text-xs max-w-[260px] truncate" title={row.planName}>{row.planName || "\u2014"}</td>
                       <td className="px-4 py-2.5 text-bob-text-soft text-xs">{row.grouping}</td>
                       <td className="px-4 py-2.5 text-right tabular-nums text-xs">{row.rate ? fmtRate(row.rate) : "\u2014"}</td>
                       <td className="px-4 py-2.5 text-right font-semibold tabular-nums">{row.lives}</td>

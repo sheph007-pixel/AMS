@@ -23,7 +23,7 @@ export function MainContent({ children }: { children: React.ReactNode }) {
       style={{ "--sidebar-ml": `${collapsed ? 72 : 200}px` } as React.CSSProperties}
     >
       {/* On mobile: no margin-left, top padding for fixed header bar */}
-      <div className="max-w-6xl mx-auto px-4 py-4 pt-[72px] md:px-8 md:py-8 md:pt-8">
+      <div className="px-4 py-4 pt-[72px] md:px-6 md:py-6 md:pt-6">
         {children}
       </div>
     </main>
