@@ -91,7 +91,7 @@ const CSV_HEADERS = [
   "Year", "Month", "Transaction Date", "Client Name", "Client Code", "SIC Code", "State",
   "Insurance Carrier", "Line of Business", "Plan Name", "Coverage Type",
   "Eligible Employees", "Enrolled Employees", "Monthly Premium",
-  "Fee Type", "Rate", "Est. Monthly Commission/Fee", "Est. Annual Commission/Fee",
+  "Fee Type", "Rate", "Agency Commission", "Annual Agency Commission",
   "Agency Code", "Bill Type", "Producer", "Broker", "Department",
 ];
 
@@ -133,13 +133,15 @@ function toExcelXML(rows: ProductionRow[], summary: Summary | null, methodology:
 
   // ─── Tab 1: Cover Sheet ─────────────────────────────────────────────
   xml += `<Worksheet ss:Name="Cover Sheet"><Table>`;
-  xml += `<Row>${cell("KENNION AMS — PRODUCTION REPORT", "Title")}</Row>`;
+  xml += `<Row>${cell("KENNION / NIA — PRODUCTION REPORT", "Title")}</Row>`;
+  xml += `<Row>${cell("Fiscal Years 2022–2025")}</Row>`;
   xml += blankRow();
   xml += `<Row>${cell("Report Generated:", "Bold")}${cell(new Date().toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric", hour: "2-digit", minute: "2-digit" }))}</Row>`;
+  xml += `<Row>${cell("Prepared For:", "Bold")}${cell("Reagan Consulting")}</Row>`;
   xml += `<Row>${cell("Prepared By:", "Bold")}${cell("Kennion Agency Management System")}</Row>`;
-  xml += `<Row>${cell("Agency:", "Bold")}${cell("Kennion")}</Row>`;
+  xml += `<Row>${cell("Agency:", "Bold")}${cell("Kennion / NIA")}</Row>`;
   if (summary) {
-    xml += `<Row>${cell("Period Covered:", "Bold")}${cell(`${summary.totalPeriods} months of enrollment data`)}</Row>`;
+    xml += `<Row>${cell("Period Covered:", "Bold")}${cell(`${summary.totalPeriods} months of enrollment data (FY 2022–2025)`)}</Row>`;
     xml += `<Row>${cell("Total Clients:", "Bold")}${cell(String(summary.totalClients))}</Row>`;
     xml += `<Row>${cell("Total Detail Rows:", "Bold")}${cell(summary.totalRows.toLocaleString())}</Row>`;
   }
@@ -196,8 +198,8 @@ function toExcelXML(rows: ProductionRow[], summary: Summary | null, methodology:
     ["Monthly Premium", "Total monthly premium billed", "Sum of PlanCost"],
     ["Fee Type", "PEPM or Commission", "Carrier classification"],
     ["Rate", "Fee rate applied", "Standard fee schedule"],
-    ["Est. Monthly Commission/Fee", "Estimated monthly fee income", "Calculated"],
-    ["Est. Annual Commission/Fee", "Monthly fee x 12", "Calculated"],
+    ["Agency Commission", "Monthly agency commission or fee income", "PEPM rate x enrolled, or premium x commission rate"],
+    ["Annual Agency Commission", "Agency commission x 12", "Annualized"],
     ["Agency Code", "Agency identifier", "KENNION"],
     ["Bill Type", "Billing method", "Direct"],
     ["Producer", "Producing agent", "Kennion Benefits"],
@@ -257,7 +259,7 @@ function toExcelXML(rows: ProductionRow[], summary: Summary | null, methodology:
   }
 
   xml += `<Worksheet ss:Name="Summary by Year"><Table>`;
-  xml += `<Row>${cell("Fiscal Year", "Bold")}${cell("Clients", "Bold")}${cell("Detail Rows", "Bold")}${cell("Total Enrolled", "Bold")}${cell("Total Premium", "Bold")}${cell("Est. Fee Income", "Bold")}${cell("Effective Margin", "Bold")}</Row>`;
+  xml += `<Row>${cell("Fiscal Year", "Bold")}${cell("Clients", "Bold")}${cell("Detail Rows", "Bold")}${cell("Total Enrolled", "Bold")}${cell("Total Premium", "Bold")}${cell("Agency Commission", "Bold")}${cell("Effective Margin", "Bold")}</Row>`;
   let grandPremium = 0, grandFee = 0;
   for (const [year, data] of Array.from(yearMap.entries()).sort((a, b) => a[0] - b[0])) {
     const margin = data.premium > 0 ? data.estFee / data.premium : 0;
@@ -281,7 +283,7 @@ function toExcelXML(rows: ProductionRow[], summary: Summary | null, methodology:
   }
 
   xml += `<Worksheet ss:Name="Summary by Carrier"><Table>`;
-  xml += `<Row>${cell("Insurance Carrier", "Bold")}${cell("Clients", "Bold")}${cell("Detail Rows", "Bold")}${cell("Total Enrolled", "Bold")}${cell("Total Premium", "Bold")}${cell("Est. Fee Income", "Bold")}${cell("Fee Type", "Bold")}</Row>`;
+  xml += `<Row>${cell("Insurance Carrier", "Bold")}${cell("Clients", "Bold")}${cell("Detail Rows", "Bold")}${cell("Total Enrolled", "Bold")}${cell("Total Premium", "Bold")}${cell("Agency Commission", "Bold")}${cell("Fee Type", "Bold")}</Row>`;
   for (const [carrier, data] of Array.from(carrierMap.entries()).sort((a, b) => b[1].premium - a[1].premium)) {
     const isPEPM = PEPM_CARRIERS.some(c => carrier.toLowerCase().includes(c.toLowerCase()));
     const isComm = COMMISSION_CARRIERS.some(c => carrier.toLowerCase().includes(c.toLowerCase()));
@@ -289,6 +291,26 @@ function toExcelXML(rows: ProductionRow[], summary: Summary | null, methodology:
     xml += `<Row>${cell(carrier)}${numCell(data.clients.size)}${numCell(data.rows)}${numCell(data.enrolled)}${numCell(Math.round(data.premium * 100) / 100, "Currency")}${numCell(Math.round(data.estFee * 100) / 100, "Currency")}${cell(feeType)}</Row>`;
   }
   xml += `<Row>${cell("TOTAL", "Bold")}${cell("")}${numCell(rows.length)}${cell("")}${numCell(Math.round(grandPremium * 100) / 100, "CurrencyBold")}${numCell(Math.round(grandFee * 100) / 100, "CurrencyBold")}${cell("")}</Row>`;
+  xml += `</Table></Worksheet>`;
+
+  // ─── Tab 5: Summary by Client ──────────────────────────────────────
+  const clientMap = new Map<string, { code: string; carriers: Set<string>; enrolled: number; premium: number; estFee: number; rows: number }>();
+  for (const r of rows) {
+    let c = clientMap.get(r.clientName);
+    if (!c) { c = { code: r.clientCode, carriers: new Set(), enrolled: 0, premium: 0, estFee: 0, rows: 0 }; clientMap.set(r.clientName, c); }
+    c.carriers.add(r.carrier);
+    c.enrolled += r.enrolled;
+    c.premium += r.monthlyPremium;
+    c.estFee += r.estMonthlyFee;
+    c.rows++;
+  }
+
+  xml += `<Worksheet ss:Name="Summary by Client"><Table>`;
+  xml += `<Row>${cell("Client Name", "Bold")}${cell("Client Code", "Bold")}${cell("Carriers", "Bold")}${cell("Detail Rows", "Bold")}${cell("Total Enrolled", "Bold")}${cell("Total Premium", "Bold")}${cell("Agency Commission", "Bold")}${cell("Annual Commission", "Bold")}</Row>`;
+  for (const [name, data] of Array.from(clientMap.entries()).sort((a, b) => b[1].premium - a[1].premium)) {
+    xml += `<Row>${cell(name)}${cell(data.code)}${numCell(data.carriers.size)}${numCell(data.rows)}${numCell(data.enrolled)}${numCell(Math.round(data.premium * 100) / 100, "Currency")}${numCell(Math.round(data.estFee * 100) / 100, "Currency")}${numCell(Math.round(data.estFee * 12 * 100) / 100, "Currency")}</Row>`;
+  }
+  xml += `<Row>${cell("TOTAL", "Bold")}${cell("")}${cell("")}${numCell(rows.length)}${cell("")}${numCell(Math.round(grandPremium * 100) / 100, "CurrencyBold")}${numCell(Math.round(grandFee * 100) / 100, "CurrencyBold")}${numCell(Math.round(grandFee * 12 * 100) / 100, "CurrencyBold")}</Row>`;
   xml += `</Table></Worksheet>`;
 
   xml += "</Workbook>";
@@ -325,7 +347,7 @@ export default function ProductionReportPage() {
   const [periods, setPeriods] = useState<string[]>([]);
   const [audit, setAudit] = useState<AuditInfo | null>(null);
   const [search, setSearch] = useState("");
-  const [yearFilter, setYearFilter] = useState<string>("all");
+  const [yearFilter, setYearFilter] = useState<string>("2022-2025");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [sortKey, setSortKey] = useState<SortKey>("transactionDate");
@@ -357,7 +379,8 @@ export default function ProductionReportPage() {
   const years = Array.from(new Set(rows.map(r => r.year))).sort();
 
   const filtered = rows.filter(r => {
-    if (yearFilter !== "all" && r.year !== Number(yearFilter)) return false;
+    if (yearFilter === "2022-2025") { if (r.year < 2022 || r.year > 2025) return false; }
+    else if (yearFilter !== "all" && r.year !== Number(yearFilter)) return false;
     if (!search) return true;
     const q = search.toLowerCase();
     return (
@@ -407,12 +430,12 @@ export default function ProductionReportPage() {
   }
 
   function handleCSV() {
-    downloadFile(toCSV(sorted), "kennion-ams-production-report.csv", "text/csv");
+    downloadFile(toCSV(sorted), "kennion-nia-production-report-fy2022-2025.csv", "text/csv");
     setExportOpen(false);
   }
 
   function handleExcel() {
-    downloadFile(toExcelXML(sorted, summary, methodology, audit), "kennion-ams-production-report.xls", "application/vnd.ms-excel");
+    downloadFile(toExcelXML(sorted, summary, methodology, audit), "kennion-nia-production-report-fy2022-2025.xls", "application/vnd.ms-excel");
     setExportOpen(false);
   }
 
@@ -421,7 +444,7 @@ export default function ProductionReportPage() {
     if (!printWindow) return;
     const tableHTML = tableRef.current?.querySelector("table")?.outerHTML || "";
     printWindow.document.write(`
-      <html><head><title>Production Report — Kennion AMS</title>
+      <html><head><title>Production Report — Kennion / NIA</title>
       <style>
         body { font-family: system-ui, sans-serif; padding: 20px; }
         h1 { font-size: 18px; margin-bottom: 4px; }
@@ -431,7 +454,7 @@ export default function ProductionReportPage() {
         th { background: #f5f5f5; font-weight: 600; }
         @media print { body { padding: 0; } }
       </style></head><body>
-      <h1>Production Report — Kennion AMS</h1>
+      <h1>Production Report — Kennion / NIA</h1>
       <div class="sub">Fiscal Years 2022–2025 | Kennion</div>
       ${tableHTML}
       </body></html>
@@ -527,7 +550,7 @@ export default function ProductionReportPage() {
         </a>
         <h1 className="text-3xl font-bold tracking-tight text-bob-text">Production Report</h1>
         <p className="text-bob-text-soft mt-1">
-          Full production detail — all carriers, clients, premiums, and fees across fiscal years 2022–present
+          Full production report detail — all carriers, clients, premiums, and agency commissions | Fiscal Years 2022–2025
         </p>
       </div>
 
@@ -551,7 +574,7 @@ export default function ProductionReportPage() {
             <p className="text-2xl font-bold text-bob-text mt-1">{formatCurrency(summary.totalPremium)}</p>
           </div>
           <div className="bg-white rounded-xl border border-bob-border p-4">
-            <p className="text-xs font-medium text-bob-text-soft uppercase tracking-wide">Est. Fee Income</p>
+            <p className="text-xs font-medium text-bob-text-soft uppercase tracking-wide">Agency Commission</p>
             <p className="text-2xl font-bold text-bob-green mt-1">{formatCurrency(summary.totalEstIncome)}</p>
           </div>
         </div>
@@ -576,6 +599,7 @@ export default function ProductionReportPage() {
           onChange={(e) => setYearFilter(e.target.value)}
           className="px-4 py-2.5 rounded-xl border border-bob-border bg-white text-sm text-bob-text focus:outline-none focus:ring-2 focus:ring-bob-purple/30"
         >
+          <option value="2022-2025">FY 2022–2025</option>
           <option value="all">All Years</option>
           {years.map(y => <option key={y} value={y}>{y}</option>)}
         </select>
@@ -606,9 +630,9 @@ export default function ProductionReportPage() {
       {/* Filtered count */}
       <div className="text-xs text-bob-text-soft mb-2">
         Showing {filtered.length.toLocaleString()} of {rows.length.toLocaleString()} rows
-        {yearFilter !== "all" && ` for ${yearFilter}`}
+        {yearFilter !== "all" && ` for ${yearFilter === "2022-2025" ? "FY 2022–2025" : yearFilter}`}
         {search && ` matching "${search}"`}
-        {" | "}Premium: {formatCurrency(filteredTotals.premium)} | Est. Fee: {formatCurrency(filteredTotals.estIncome)}
+        {" | "}Premium: {formatCurrency(filteredTotals.premium)} | Commission: {formatCurrency(filteredTotals.estIncome)}
       </div>
 
       {/* Data Table */}
@@ -628,7 +652,7 @@ export default function ProductionReportPage() {
                   ["enrolled", "Enrolled"],
                   ["monthlyPremium", "Premium"],
                   ["feeType", "Fee Type"],
-                  ["estMonthlyFee", "Est. Fee"],
+                  ["estMonthlyFee", "Commission"],
                 ] as [SortKey, string][]).map(([key, label]) => (
                   <th
                     key={key}
