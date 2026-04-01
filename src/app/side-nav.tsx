@@ -36,15 +36,6 @@ const adminNavItems = [
       </svg>
     ),
   },
-  {
-    href: "/rules",
-    label: "Rules",
-    icon: (active: boolean) => (
-      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke={active ? "#7C5CFC" : "#9CA3AF"} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-        <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" /><path d="M9 12l2 2 4-4" />
-      </svg>
-    ),
-  },
 ];
 
 const ADMIN_PIN = "8787";
