@@ -75,6 +75,15 @@ function getPremium(enrollment: any): number {
 
 // ─── Core Data Processing ────────────────────────────────────────────────────
 
+interface AggEntry {
+  carrier: string;
+  planType: string;
+  planName: string;
+  eligible: number;
+  enrolled: number;
+  premium: number;
+}
+
 interface ProcessedSnapshot {
   year: number;
   month: number;
@@ -83,16 +92,19 @@ interface ProcessedSnapshot {
   sicCode: string;
   state: string;
   importedAt: Date;
-  agg: Map<string, {
-    carrier: string;
-    planType: string;
-    planName: string;
-    eligibleSet: Set<string>;
-    enrolledSet: Set<string>;
-    premium: number;
-  }>;
+  agg: Map<string, AggEntry>;
 }
 
+/**
+ * Core processing: reads BenefitPlan records directly for premium/enrollment data.
+ *
+ * BenefitPlan.premium, .enrollees, .eligible are computed during XML import using
+ * full 8-field extraction (PlanCost, MonthlyPlanCost, TotalPremium, Premium, etc.)
+ * and are the authoritative source of truth.
+ *
+ * This eliminates the need to re-parse employee enrollment metadata on every
+ * cache rebuild — faster, simpler, and guaranteed to match import numbers.
+ */
 async function processAllSnapshots(): Promise<ProcessedSnapshot[]> {
   const exclusionRules = await getExclusionRules();
 
@@ -101,6 +113,9 @@ async function processAllSnapshots(): Promise<ProcessedSnapshot[]> {
     select: {
       id: true, year: true, month: true, sicCode: true, state: true, importedAt: true,
       client: { select: { groupId: true, groupName: true } },
+      benefitPlans: {
+        select: { carrier: true, planType: true, planName: true, premium: true, enrollees: true, eligible: true },
+      },
     },
     orderBy: [{ year: "asc" }, { month: "asc" }],
   });
@@ -110,75 +125,25 @@ async function processAllSnapshots(): Promise<ProcessedSnapshot[]> {
   for (const snap of snapshotList) {
     if (isExcluded({ groupName: snap.client.groupName }, exclusionRules)) continue;
 
-    // Fetch benefit plans
-    const benefitPlans = await prisma.benefitPlan.findMany({
-      where: { clientSnapshotId: snap.id },
-      select: { carrier: true, planType: true, planName: true, metadata: true },
-    });
+    const agg = new Map<string, AggEntry>();
 
-    const planIdMap = new Map<string, { carrier: string; planType: string; planName: string }>();
-    const planNameMap = new Map<string, { carrier: string; planType: string; planName: string }>();
-
-    for (const bp of benefitPlans) {
+    for (const bp of snap.benefitPlans) {
       if (isExcluded({ carrier: bp.carrier, planName: bp.planName, planType: bp.planType }, exclusionRules)) continue;
+
       const carrier = bp.carrier || "Unspecified Carrier";
-      const info = { carrier, planType: bp.planType, planName: bp.planName || "" };
-      if (bp.metadata) {
-        try {
-          const meta = JSON.parse(bp.metadata);
-          const planId = meta.PlanIdentifier || meta.planIdentifier;
-          if (planId) planIdMap.set(String(planId), info);
-        } catch { /* */ }
+      const key = `${carrier}||${bp.planType}`;
+      let entry = agg.get(key);
+      if (!entry) {
+        entry = { carrier, planType: bp.planType, planName: bp.planName || "", eligible: 0, enrolled: 0, premium: 0 };
+        agg.set(key, entry);
       }
-      if (bp.planName) planNameMap.set(bp.planName, info);
+
+      entry.premium += bp.premium || 0;
+      entry.enrolled += bp.enrollees || 0;
+      entry.eligible += bp.eligible || 0;
     }
 
-    if (planIdMap.size === 0 && planNameMap.size === 0) continue;
-
-    const agg = new Map<string, {
-      carrier: string; planType: string; planName: string;
-      eligibleSet: Set<string>; enrolledSet: Set<string>; premium: number;
-    }>();
-
-    // Fetch employees in batches
-    let skip = 0;
-    let hasMore = true;
-    while (hasMore) {
-      const emps = await prisma.employeeSnapshot.findMany({
-        where: { clientSnapshotId: snap.id },
-        select: { employeeId: true, status: true, metadata: true },
-        take: BATCH_SIZE,
-        skip,
-      });
-      if (emps.length < BATCH_SIZE) hasMore = false;
-      skip += BATCH_SIZE;
-
-      for (const emp of emps) {
-        if ((emp.status || "Active").toLowerCase() !== "active") continue;
-        if (!emp.metadata) continue;
-        let meta: any;
-        try { meta = JSON.parse(emp.metadata); } catch { continue; }
-
-        for (const enrollment of findEnrollments(meta)) {
-          const info = resolvePlan(enrollment, planIdMap, planNameMap);
-          if (!info) continue;
-
-          const key = `${info.carrier}||${info.planType}`;
-          let entry = agg.get(key);
-          if (!entry) {
-            entry = { carrier: info.carrier, planType: info.planType, planName: info.planName, eligibleSet: new Set(), enrolledSet: new Set(), premium: 0 };
-            agg.set(key, entry);
-          }
-
-          entry.eligibleSet.add(emp.employeeId);
-
-          if (qualifyEnrollment(enrollment)) {
-            entry.enrolledSet.add(emp.employeeId);
-            entry.premium += getPremium(enrollment);
-          }
-        }
-      }
-    }
+    if (agg.size === 0) continue;
 
     results.push({
       year: snap.year, month: snap.month,
@@ -207,7 +172,7 @@ function buildProductionReport(snapshots: ProcessedSnapshot[]) {
     clientsSet.add(snap.clientCode);
 
     for (const entry of snap.agg.values()) {
-      const enrolled = entry.enrolledSet.size;
+      const enrolled = entry.enrolled;
       const premium = Math.round(entry.premium * 100) / 100;
       const isPEPM = PEPM_CARRIERS.some(c => entry.carrier.toLowerCase().includes(c.toLowerCase()));
       const isComm = COMMISSION_CARRIERS.some(c => entry.carrier.toLowerCase().includes(c.toLowerCase()));
@@ -227,7 +192,7 @@ function buildProductionReport(snapshots: ProcessedSnapshot[]) {
         sicCode: snap.sicCode, state: snap.state,
         carrier: entry.carrier, lineOfBusiness: entry.planType,
         planName: entry.planName, coverageType: "Group",
-        eligible: entry.eligibleSet.size, enrolled,
+        eligible: entry.eligible, enrolled,
         monthlyPremium: premium, feeType, rate,
         estMonthlyFee, estAnnualFee: Math.round(estMonthlyFee * 12 * 100) / 100,
         agencyCode: "KENNION", billType: "Direct",
@@ -283,7 +248,7 @@ function buildProductionReport(snapshots: ProcessedSnapshot[]) {
 function buildDashboard(snapshots: ProcessedSnapshot[]) {
   const periodData = new Map<string, {
     year: number; month: number; clients: Set<string>;
-    activeEmployees: Set<string>; premium: number; estIncome: number;
+    activeEmployees: number; premium: number; estIncome: number;
     carrierPremium: Map<string, number>; lobPremium: Map<string, number>;
   }>();
 
@@ -294,13 +259,15 @@ function buildDashboard(snapshots: ProcessedSnapshot[]) {
     const key = `${snap.year}-${String(snap.month).padStart(2, "0")}`;
     let pd = periodData.get(key);
     if (!pd) {
-      pd = { year: snap.year, month: snap.month, clients: new Set(), activeEmployees: new Set(), premium: 0, estIncome: 0, carrierPremium: new Map(), lobPremium: new Map() };
+      pd = { year: snap.year, month: snap.month, clients: new Set(), activeEmployees: 0, premium: 0, estIncome: 0, carrierPremium: new Map(), lobPremium: new Map() };
       periodData.set(key, pd);
     }
     pd.clients.add(snap.clientCode);
 
+    // Track max enrolled per snapshot (best proxy for unique employees without double-counting across plans)
+    let maxEnrolledThisSnap = 0;
     for (const entry of snap.agg.values()) {
-      const enrolled = entry.enrolledSet.size;
+      const enrolled = entry.enrolled;
       const premium = entry.premium;
       pd.premium += premium;
       pd.carrierPremium.set(entry.carrier, (pd.carrierPremium.get(entry.carrier) || 0) + premium);
@@ -311,10 +278,9 @@ function buildDashboard(snapshots: ProcessedSnapshot[]) {
       if (isPEPM) pd.estIncome += enrolled * PEPM_RATE;
       else if (isComm) pd.estIncome += premium * COMMISSION_RATE;
 
-      for (const empId of entry.enrolledSet) {
-        pd.activeEmployees.add(`${snap.clientCode}::${empId}`);
-      }
+      if (enrolled > maxEnrolledThisSnap) maxEnrolledThisSnap = enrolled;
     }
+    pd.activeEmployees += maxEnrolledThisSnap;
   }
 
   const previousYear = latestYear - 1;
@@ -324,7 +290,7 @@ function buildDashboard(snapshots: ProcessedSnapshot[]) {
       period, year: pd.year, month: pd.month,
       premium: Math.round(pd.premium * 100) / 100,
       clients: pd.clients.size,
-      employees: pd.activeEmployees.size,
+      employees: pd.activeEmployees,
       estIncome: Math.round(pd.estIncome * 100) / 100,
     }));
 
@@ -386,14 +352,14 @@ function buildIncomeReport(snapshots: ProcessedSnapshot[]) {
     if (!latestImport || s.importedAt > latestImport) latestImport = s.importedAt;
   }
 
-  const carrierMap = new Map<string, { enrolledEmployees: Set<string>; monthlyPremium: number }>();
+  const carrierMap = new Map<string, { enrolledCount: number; monthlyPremium: number }>();
 
   for (const snap of latestSnaps) {
     for (const entry of snap.agg.values()) {
       let cm = carrierMap.get(entry.carrier);
-      if (!cm) { cm = { enrolledEmployees: new Set(), monthlyPremium: 0 }; carrierMap.set(entry.carrier, cm); }
+      if (!cm) { cm = { enrolledCount: 0, monthlyPremium: 0 }; carrierMap.set(entry.carrier, cm); }
       cm.monthlyPremium += entry.premium;
-      for (const empId of entry.enrolledSet) cm.enrolledEmployees.add(`${snap.clientCode}::${empId}`);
+      cm.enrolledCount += entry.enrolled;
     }
   }
 
@@ -402,7 +368,7 @@ function buildIncomeReport(snapshots: ProcessedSnapshot[]) {
     const data = carrierMap.get(cn);
     if (!data) continue;
     const isPEPM = PEPM_CARRIERS.includes(cn);
-    const enrolled = data.enrolledEmployees.size;
+    const enrolled = data.enrolledCount;
     const premium = Math.round(data.monthlyPremium * 100) / 100;
     const monthlyIncome = Math.round((isPEPM ? enrolled * PEPM_RATE : premium * COMMISSION_RATE) * 100) / 100;
     incomeRows.push({
@@ -462,23 +428,22 @@ function buildBenefitsReport(snapshots: ProcessedSnapshot[]) {
   // Carrier-level aggregation
   const carrierMap = new Map<string, {
     carrier: string;
-    eligibleEmployees: Set<string>;
-    enrolledEmployees: Set<string>;
-    enrollmentRows: number;
+    eligibleCount: number;
+    enrolledCount: number;
     monthlyPremium: number;
   }>();
 
   // Carrier → Set of clientCodes
   const carrierCompanies = new Map<string, Set<string>>();
 
-  // Company info
-  const companyInfo = new Map<string, { groupName: string; activeEmployees: Set<string> }>();
+  // Company info: groupName + max enrolled (best proxy for active employees)
+  const companyInfo = new Map<string, { groupName: string; maxEnrolled: number; totalPremium: number }>();
 
   // Company-carrier detail
-  const companyCarrierData = new Map<string, { distinctEnrolled: Set<string>; enrollmentRows: number; premium: number }>();
+  const companyCarrierData = new Map<string, { enrolledCount: number; premium: number }>();
 
-  // Company plan-type enrollment
-  const companyPlanTypeEnrolled = new Map<string, Record<string, Set<string>>>();
+  // Company plan-type enrollment counts
+  const companyPlanTypeCounts = new Map<string, Record<string, number>>();
 
   let totalCompanies = 0;
 
@@ -487,7 +452,7 @@ function buildBenefitsReport(snapshots: ProcessedSnapshot[]) {
     const clientId = snap.clientCode;
 
     if (!companyInfo.has(clientId)) {
-      companyInfo.set(clientId, { groupName: snap.clientName, activeEmployees: new Set() });
+      companyInfo.set(clientId, { groupName: snap.clientName, maxEnrolled: 0, totalPremium: 0 });
     }
 
     for (const [, entry] of snap.agg) {
@@ -501,51 +466,43 @@ function buildBenefitsReport(snapshots: ProcessedSnapshot[]) {
       // Carrier-level aggregation
       let cd = carrierMap.get(carrier);
       if (!cd) {
-        cd = { carrier, eligibleEmployees: new Set(), enrolledEmployees: new Set(), enrollmentRows: 0, monthlyPremium: 0 };
+        cd = { carrier, eligibleCount: 0, enrolledCount: 0, monthlyPremium: 0 };
         carrierMap.set(carrier, cd);
       }
       cd.monthlyPremium += entry.premium;
-      cd.enrollmentRows += entry.enrolledSet.size;
+      cd.enrolledCount += entry.enrolled;
+      cd.eligibleCount += entry.eligible;
 
-      for (const empId of entry.enrolledSet) {
-        const empKey = `${clientId}::${empId}`;
-        cd.enrolledEmployees.add(empKey);
-        companyInfo.get(clientId)!.activeEmployees.add(empKey);
-      }
-      for (const empId of entry.eligibleSet) {
-        const empKey = `${clientId}::${empId}`;
-        cd.eligibleEmployees.add(empKey);
-        companyInfo.get(clientId)!.activeEmployees.add(empKey);
-      }
+      // Track max enrolled per company (best proxy for active employee count)
+      const ci = companyInfo.get(clientId)!;
+      if (entry.enrolled > ci.maxEnrolled) ci.maxEnrolled = entry.enrolled;
+      ci.totalPremium += entry.premium;
 
       // Company-carrier detail
       const ccKey = `${carrier}::${clientId}`;
       let ccd = companyCarrierData.get(ccKey);
-      if (!ccd) { ccd = { distinctEnrolled: new Set(), enrollmentRows: 0, premium: 0 }; companyCarrierData.set(ccKey, ccd); }
+      if (!ccd) { ccd = { enrolledCount: 0, premium: 0 }; companyCarrierData.set(ccKey, ccd); }
       ccd.premium += entry.premium;
-      ccd.enrollmentRows += entry.enrolledSet.size;
-      for (const empId of entry.enrolledSet) ccd.distinctEnrolled.add(`${clientId}::${empId}`);
+      ccd.enrolledCount += entry.enrolled;
 
-      // Company plan-type
-      let cpt = companyPlanTypeEnrolled.get(clientId);
+      // Company plan-type counts
+      let cpt = companyPlanTypeCounts.get(clientId);
       if (!cpt) {
-        cpt = { Medical: new Set(), Dental: new Set(), Vision: new Set(), Supplemental: new Set() };
-        companyPlanTypeEnrolled.set(clientId, cpt);
+        cpt = { Medical: 0, Dental: 0, Vision: 0, Supplemental: 0 };
+        companyPlanTypeCounts.set(clientId, cpt);
       }
-      for (const empId of entry.enrolledSet) {
-        if (cpt[category]) cpt[category].add(empId);
-      }
+      if (entry.enrolled > (cpt[category] || 0)) cpt[category] = entry.enrolled;
     }
   }
 
   // Build rows
   const rows = Array.from(carrierMap.values())
-    .filter(e => e.eligibleEmployees.size > 0)
+    .filter(e => e.eligibleCount > 0 || e.enrolledCount > 0)
     .map(e => ({
       carrier: e.carrier,
       groups: carrierCompanies.get(e.carrier)?.size || 0,
-      eligible: e.eligibleEmployees.size,
-      enrolled: e.enrolledEmployees.size,
+      eligible: e.eligibleCount,
+      enrolled: e.enrolledCount,
       monthlyPremium: Math.round(e.monthlyPremium * 100) / 100,
     }))
     .sort((a, b) => b.monthlyPremium - a.monthlyPremium);
@@ -559,12 +516,12 @@ function buildBenefitsReport(snapshots: ProcessedSnapshot[]) {
 
   // Reconciliation
   const carrierAudit = Array.from(carrierMap.values())
-    .filter(e => e.eligibleEmployees.size > 0)
+    .filter(e => e.eligibleCount > 0 || e.enrolledCount > 0)
     .map(e => ({
       carrier: e.carrier,
-      eligible: e.eligibleEmployees.size,
-      enrolled: e.enrolledEmployees.size,
-      enrollmentRows: e.enrollmentRows,
+      eligible: e.eligibleCount,
+      enrolled: e.enrolledCount,
+      enrollmentRows: e.enrolledCount,
       monthlyPremium: Math.round(e.monthlyPremium * 100) / 100,
     }))
     .sort((a, b) => b.monthlyPremium - a.monthlyPremium);
@@ -576,8 +533,8 @@ function buildBenefitsReport(snapshots: ProcessedSnapshot[]) {
       if (!info) continue;
       companyEligibility.push({
         carrier, companyId: clientId, companyName: info.groupName,
-        activeEmployees: info.activeEmployees.size, hasCarrierPlan: true,
-        eligibleContributed: info.activeEmployees.size,
+        activeEmployees: info.maxEnrolled, hasCarrierPlan: true,
+        eligibleContributed: info.maxEnrolled,
       });
     }
   }
@@ -589,7 +546,7 @@ function buildBenefitsReport(snapshots: ProcessedSnapshot[]) {
     const info = companyInfo.get(clientId);
     companyEnrollment.push({
       carrier, companyId: clientId, companyName: info?.groupName || clientId,
-      enrolled: data.distinctEnrolled.size, enrollmentRows: data.enrollmentRows,
+      enrolled: data.enrolledCount, enrollmentRows: data.enrolledCount,
       premium: Math.round(data.premium * 100) / 100,
     });
   }
@@ -598,18 +555,14 @@ function buildBenefitsReport(snapshots: ProcessedSnapshot[]) {
   // Company plan types
   const companyPlanTypes: Record<string, any> = {};
   for (const [clientId, info] of companyInfo) {
-    const planTypes = companyPlanTypeEnrolled.get(clientId);
-    let companyPremium = 0;
-    for (const [key, data] of companyCarrierData) {
-      if (key.endsWith(`::${clientId}`)) companyPremium += data.premium;
-    }
+    const planTypes = companyPlanTypeCounts.get(clientId);
     companyPlanTypes[clientId] = {
-      activeEmployees: info.activeEmployees.size,
-      medical: planTypes?.Medical?.size ?? 0,
-      dental: planTypes?.Dental?.size ?? 0,
-      vision: planTypes?.Vision?.size ?? 0,
-      supplemental: planTypes?.Supplemental?.size ?? 0,
-      premium: Math.round(companyPremium * 100) / 100,
+      activeEmployees: info.maxEnrolled,
+      medical: planTypes?.Medical ?? 0,
+      dental: planTypes?.Dental ?? 0,
+      vision: planTypes?.Vision ?? 0,
+      supplemental: planTypes?.Supplemental ?? 0,
+      premium: Math.round(info.totalPremium * 100) / 100,
     };
   }
 
@@ -617,13 +570,15 @@ function buildBenefitsReport(snapshots: ProcessedSnapshot[]) {
   let prevTotalCompanies = 0, prevTotalActiveEmployees = 0, prevTotalPremium = 0;
   for (const snap of prevSnaps) {
     prevTotalCompanies++;
+    let maxEnrolled = 0;
     for (const entry of snap.agg.values()) {
       prevTotalPremium += entry.premium;
-      prevTotalActiveEmployees += entry.enrolledSet.size;
+      if (entry.enrolled > maxEnrolled) maxEnrolled = entry.enrolled;
     }
+    prevTotalActiveEmployees += maxEnrolled;
   }
 
-  const totalActiveEmployees = Array.from(companyInfo.values()).reduce((s, c) => s + c.activeEmployees.size, 0);
+  const totalActiveEmployees = Array.from(companyInfo.values()).reduce((s, c) => s + c.maxEnrolled, 0);
   const dataPeriod = `${latestYear}-${String(latestMonth).padStart(2, "0")}`;
   const prevPeriod = prevYear > 0 ? `${prevYear}-${String(prevMonth).padStart(2, "0")}` : null;
 
