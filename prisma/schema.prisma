@@ -46,6 +46,7 @@ model ClientSnapshot {
   employees     EmployeeSnapshot[]
 
   @@unique([clientId, year, month])
+  @@index([year, month])
 }
 
 /// A benefit plan attached to a client snapshot (year-specific).
@@ -62,6 +63,8 @@ model BenefitPlan {
   metadata    String? /// Raw plan data as JSON
 
   clientSnapshot ClientSnapshot @relation(fields: [clientSnapshotId], references: [id], onDelete: Cascade)
+
+  @@index([clientSnapshotId])
 }
 
 /// Exclusion rule — carriers/entities that must be filtered out of the system.
@@ -93,6 +96,7 @@ model EmployeeSnapshot {
   clientSnapshot ClientSnapshot @relation(fields: [clientSnapshotId], references: [id], onDelete: Cascade)
 
   @@unique([clientSnapshotId, employeeId])
+  @@index([clientSnapshotId])
 }
 
 // ─── Financial Data Models ───────────────────────────────────────────────────
@@ -142,6 +146,9 @@ model FinancialTransaction {
 
   entity  FinancialEntity @relation(fields: [entityId], references: [id], onDelete: Cascade)
   account ChartOfAccounts @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  @@index([entityId, year, month])
+  @@index([accountId])
 }
 
 /// Tracking record for uploaded financial statements.

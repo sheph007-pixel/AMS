@@ -19,7 +19,9 @@ export async function GET() {
       return NextResponse.json({ rows: [], summary: null, audit: null, periods: [], methodology: null });
     }
 
-    return NextResponse.json(data);
+    return NextResponse.json(data, {
+      headers: { "Cache-Control": "private, max-age=300" },
+    });
   } catch (error) {
     console.error("Production report error:", error);
     return NextResponse.json({ error: "Failed to generate production report" }, { status: 500 });

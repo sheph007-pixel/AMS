@@ -327,6 +327,7 @@ export default function ProductionReportPage() {
   const [search, setSearch] = useState("");
   const [yearFilter, setYearFilter] = useState<string>("all");
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [sortKey, setSortKey] = useState<SortKey>("transactionDate");
   const [sortDir, setSortDir] = useState<SortDir>("asc");
   const [exportOpen, setExportOpen] = useState(false);
@@ -334,9 +335,11 @@ export default function ProductionReportPage() {
   const [aiAuditLoading, setAiAuditLoading] = useState(false);
   const tableRef = useRef<HTMLDivElement>(null);
 
-  useEffect(() => {
+  const loadData = () => {
+    setLoading(true);
+    setError(null);
     fetch("/api/reports/production")
-      .then((res) => res.json())
+      .then((res) => { if (!res.ok) throw new Error(`Server error (${res.status})`); return res.json(); })
       .then((data) => {
         setRows(data.rows || []);
         setSummary(data.summary || null);
@@ -344,8 +347,11 @@ export default function ProductionReportPage() {
         setPeriods(data.periods || []);
         setAudit(data.audit || null);
       })
+      .catch((err) => setError(err.message))
       .finally(() => setLoading(false));
-  }, []);
+  };
+
+  useEffect(() => { loadData(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Available years for filter
   const years = Array.from(new Set(rows.map(r => r.year))).sort();
@@ -494,7 +500,19 @@ export default function ProductionReportPage() {
         <div className="text-center">
           <div className="w-8 h-8 border-2 border-bob-coral border-t-transparent rounded-full animate-spin mx-auto mb-3" />
           <p className="text-bob-text-soft text-sm">Loading production report...</p>
-          <p className="text-bob-text-soft text-xs mt-1">Processing all fiscal years — this may take a moment</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="flex items-center justify-center min-h-[400px]">
+        <div className="text-center max-w-md">
+          <div className="w-12 h-12 rounded-full bg-red-100 flex items-center justify-center mx-auto mb-4"><span className="text-red-600 text-xl">!</span></div>
+          <p className="text-bob-text font-semibold mb-2">Failed to load production report</p>
+          <p className="text-bob-text-soft text-sm mb-4">{error}</p>
+          <button onClick={loadData} className="px-4 py-2 bg-bob-purple text-white rounded-lg text-sm font-medium hover:bg-bob-purple/90 transition-colors">Retry</button>
         </div>
       </div>
     );

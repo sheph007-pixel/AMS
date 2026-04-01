@@ -17,7 +17,9 @@ export async function GET() {
       return NextResponse.json({ rows: [], totals: null, dataPeriod: null, lastUpload: null, audit: null });
     }
 
-    return NextResponse.json(data);
+    return NextResponse.json(data, {
+      headers: { "Cache-Control": "private, max-age=300" },
+    });
   } catch (error) {
     console.error("Income report error:", error);
     return NextResponse.json({ error: "Failed to generate report" }, { status: 500 });

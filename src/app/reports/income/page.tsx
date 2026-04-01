@@ -108,21 +108,27 @@ export default function IncomeReportPage() {
   const [dataPeriod, setDataPeriod] = useState<string | null>(null);
   const [audit, setAudit] = useState<Audit | null>(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [sortKey, setSortKey] = useState<SortKey>("annualIncome");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
   const tableRef = useRef<HTMLDivElement>(null);
 
-  useEffect(() => {
+  const loadData = () => {
+    setLoading(true);
+    setError(null);
     fetch("/api/reports/income")
-      .then((res) => res.json())
+      .then((res) => { if (!res.ok) throw new Error(`Server error (${res.status})`); return res.json(); })
       .then((data) => {
         setRows(data.rows || []);
         setTotals(data.totals || null);
         setDataPeriod(data.dataPeriod || null);
         setAudit(data.audit || null);
       })
+      .catch((err) => setError(err.message))
       .finally(() => setLoading(false));
-  }, []);
+  };
+
+  useEffect(() => { loadData(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const sorted = [...rows].sort((a, b) => {
     const aVal = a[sortKey];
@@ -268,6 +274,13 @@ ${tableHTML}
         <div className="text-center py-16 text-bob-text-soft">
           <div className="w-8 h-8 border-2 border-bob-purple border-t-transparent rounded-full animate-spin mx-auto mb-3" />
           Loading report...
+        </div>
+      ) : error ? (
+        <div className="text-center py-16">
+          <div className="w-12 h-12 rounded-full bg-red-100 flex items-center justify-center mx-auto mb-4"><span className="text-red-600 text-xl">!</span></div>
+          <p className="text-bob-text font-semibold mb-2">Failed to load report</p>
+          <p className="text-bob-text-soft text-sm mb-4">{error}</p>
+          <button onClick={loadData} className="px-4 py-2 bg-bob-purple text-white rounded-lg text-sm font-medium hover:bg-bob-purple/90 transition-colors">Retry</button>
         </div>
       ) : (
         <>

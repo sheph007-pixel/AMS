@@ -87,15 +87,17 @@ export default function GroupsPage() {
   const [yoy, setYoy] = useState<YoYData | null>(null);
   const [search, setSearch] = useState("");
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [sortKey, setSortKey] = useState<SortKey>("groupName");
   const [sortDir, setSortDir] = useState<SortDir>("asc");
   const tableRef = useRef<HTMLDivElement>(null);
 
-  useEffect(() => {
-    // Fetch both APIs in parallel — clients for group list, benefits for enrollment data
+  const loadData = () => {
+    setLoading(true);
+    setError(null);
     Promise.all([
-      fetch("/api/clients").then((r) => r.json()),
-      fetch("/api/reports/benefits").then((r) => r.json()),
+      fetch("/api/clients").then((r) => { if (!r.ok) throw new Error(`Server error (${r.status})`); return r.json(); }),
+      fetch("/api/reports/benefits").then((r) => { if (!r.ok) throw new Error(`Server error (${r.status})`); return r.json(); }),
     ])
       .then(([clientsData, benefitsData]) => {
         const clients: ClientBase[] = clientsData.clients || [];
@@ -107,12 +109,10 @@ export default function GroupsPage() {
           supplemental: number;
         }> = benefitsData.companyPlanTypes || {};
 
-        // Only active groups (present in current year)
         const activeClients = clients.filter(
           (c) => c.status === "Active" || c.status === "New" || c.status === "Returned"
         );
 
-        // Merge: group list + benefits enrollment data
         const merged: ClientRow[] = activeClients.map((client) => {
           const planData = companyPlanTypes[client.id];
           return {
@@ -126,14 +126,13 @@ export default function GroupsPage() {
         });
 
         setRows(merged);
-
-        // YoY data comes directly from the benefits report
-        if (benefitsData.yoy) {
-          setYoy(benefitsData.yoy);
-        }
+        if (benefitsData.yoy) setYoy(benefitsData.yoy);
       })
+      .catch((err) => setError(err.message))
       .finally(() => setLoading(false));
-  }, []);
+  };
+
+  useEffect(() => { loadData(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const filtered = rows.filter((c) => {
     if (!search) return true;
@@ -287,6 +286,13 @@ export default function GroupsPage() {
         <div className="text-center py-16 text-bob-text-soft">
           <div className="w-8 h-8 border-2 border-bob-purple border-t-transparent rounded-full animate-spin mx-auto mb-3" />
           Loading groups...
+        </div>
+      ) : error ? (
+        <div className="text-center py-16">
+          <div className="w-12 h-12 rounded-full bg-red-100 flex items-center justify-center mx-auto mb-4"><span className="text-red-600 text-xl">!</span></div>
+          <p className="text-bob-text font-semibold mb-2">Failed to load groups</p>
+          <p className="text-bob-text-soft text-sm mb-4">{error}</p>
+          <button onClick={loadData} className="px-4 py-2 bg-bob-purple text-white rounded-lg text-sm font-medium hover:bg-bob-purple/90 transition-colors">Retry</button>
         </div>
       ) : rows.length === 0 ? (
         <div className="text-center py-16 animate-fade-in">

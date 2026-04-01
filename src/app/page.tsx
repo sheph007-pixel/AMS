@@ -97,10 +97,16 @@ export default function DashboardPage() {
   const [yoy, setYoy] = useState<YoYRow[]>([]);
   const [totalPeriods, setTotalPeriods] = useState(0);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
+  const loadData = () => {
+    setLoading(true);
+    setError(null);
     fetch("/api/dashboard")
-      .then((res) => res.json())
+      .then((res) => {
+        if (!res.ok) throw new Error(`Server error (${res.status})`);
+        return res.json();
+      })
       .then((data) => {
         setKpi(data.kpi || null);
         setTrend(data.premiumTrend || []);
@@ -109,8 +115,11 @@ export default function DashboardPage() {
         setYoy(data.yoySummary || []);
         setTotalPeriods(data.totalPeriods || 0);
       })
+      .catch((err) => setError(err.message))
       .finally(() => setLoading(false));
-  }, []);
+  };
+
+  useEffect(() => { loadData(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (loading) {
     return (
@@ -118,6 +127,23 @@ export default function DashboardPage() {
         <div className="text-center">
           <div className="w-10 h-10 border-2 border-bob-purple border-t-transparent rounded-full animate-spin mx-auto mb-4" />
           <p className="text-bob-text-soft text-sm">Loading dashboard...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="flex items-center justify-center min-h-[500px]">
+        <div className="text-center max-w-md">
+          <div className="w-12 h-12 rounded-full bg-red-100 flex items-center justify-center mx-auto mb-4">
+            <span className="text-red-600 text-xl">!</span>
+          </div>
+          <p className="text-bob-text font-semibold mb-2">Failed to load dashboard</p>
+          <p className="text-bob-text-soft text-sm mb-4">{error}</p>
+          <button onClick={loadData} className="px-4 py-2 bg-bob-purple text-white rounded-lg text-sm font-medium hover:bg-bob-purple/90 transition-colors">
+            Retry
+          </button>
         </div>
       </div>
     );

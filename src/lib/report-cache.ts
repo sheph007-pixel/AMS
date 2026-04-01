@@ -423,6 +423,230 @@ function buildIncomeReport(snapshots: ProcessedSnapshot[]) {
   };
 }
 
+// ─── Build Benefits Report ──────────────────────────────────────────────────
+
+function classifyPlanType(planType: string): string {
+  const t = planType.toLowerCase();
+  if (t.includes("medical") || t.includes("health")) return "Medical";
+  if (t.includes("dental")) return "Dental";
+  if (t.includes("vision")) return "Vision";
+  return "Supplemental";
+}
+
+function buildBenefitsReport(snapshots: ProcessedSnapshot[]) {
+  // Find latest and previous periods
+  let latestYear = 0, latestMonth = 0;
+  for (const s of snapshots) {
+    if (s.year > latestYear || (s.year === latestYear && s.month > latestMonth)) {
+      latestYear = s.year; latestMonth = s.month;
+    }
+  }
+
+  let prevYear = 0, prevMonth = 0;
+  for (const s of snapshots) {
+    if (s.year < latestYear || (s.year === latestYear && s.month < latestMonth)) {
+      if (s.year > prevYear || (s.year === prevYear && s.month > prevMonth)) {
+        prevYear = s.year; prevMonth = s.month;
+      }
+    }
+  }
+
+  const latestSnaps = snapshots.filter(s => s.year === latestYear && s.month === latestMonth);
+  const prevSnaps = snapshots.filter(s => s.year === prevYear && s.month === prevMonth);
+
+  let latestImportDate: Date | null = null;
+  for (const s of latestSnaps) {
+    if (!latestImportDate || s.importedAt > latestImportDate) latestImportDate = s.importedAt;
+  }
+
+  // Carrier-level aggregation
+  const carrierMap = new Map<string, {
+    carrier: string;
+    eligibleEmployees: Set<string>;
+    enrolledEmployees: Set<string>;
+    enrollmentRows: number;
+    monthlyPremium: number;
+  }>();
+
+  // Carrier → Set of clientCodes
+  const carrierCompanies = new Map<string, Set<string>>();
+
+  // Company info
+  const companyInfo = new Map<string, { groupName: string; activeEmployees: Set<string> }>();
+
+  // Company-carrier detail
+  const companyCarrierData = new Map<string, { distinctEnrolled: Set<string>; enrollmentRows: number; premium: number }>();
+
+  // Company plan-type enrollment
+  const companyPlanTypeEnrolled = new Map<string, Record<string, Set<string>>>();
+
+  let totalCompanies = 0;
+
+  for (const snap of latestSnaps) {
+    totalCompanies++;
+    const clientId = snap.clientCode;
+
+    if (!companyInfo.has(clientId)) {
+      companyInfo.set(clientId, { groupName: snap.clientName, activeEmployees: new Set() });
+    }
+
+    for (const [, entry] of snap.agg) {
+      const carrier = entry.carrier;
+      const category = classifyPlanType(entry.planType);
+
+      // Carrier companies
+      if (!carrierCompanies.has(carrier)) carrierCompanies.set(carrier, new Set());
+      carrierCompanies.get(carrier)!.add(clientId);
+
+      // Carrier-level aggregation
+      let cd = carrierMap.get(carrier);
+      if (!cd) {
+        cd = { carrier, eligibleEmployees: new Set(), enrolledEmployees: new Set(), enrollmentRows: 0, monthlyPremium: 0 };
+        carrierMap.set(carrier, cd);
+      }
+      cd.monthlyPremium += entry.premium;
+      cd.enrollmentRows += entry.enrolledSet.size;
+
+      for (const empId of entry.enrolledSet) {
+        const empKey = `${clientId}::${empId}`;
+        cd.enrolledEmployees.add(empKey);
+        companyInfo.get(clientId)!.activeEmployees.add(empKey);
+      }
+      for (const empId of entry.eligibleSet) {
+        const empKey = `${clientId}::${empId}`;
+        cd.eligibleEmployees.add(empKey);
+        companyInfo.get(clientId)!.activeEmployees.add(empKey);
+      }
+
+      // Company-carrier detail
+      const ccKey = `${carrier}::${clientId}`;
+      let ccd = companyCarrierData.get(ccKey);
+      if (!ccd) { ccd = { distinctEnrolled: new Set(), enrollmentRows: 0, premium: 0 }; companyCarrierData.set(ccKey, ccd); }
+      ccd.premium += entry.premium;
+      ccd.enrollmentRows += entry.enrolledSet.size;
+      for (const empId of entry.enrolledSet) ccd.distinctEnrolled.add(`${clientId}::${empId}`);
+
+      // Company plan-type
+      let cpt = companyPlanTypeEnrolled.get(clientId);
+      if (!cpt) {
+        cpt = { Medical: new Set(), Dental: new Set(), Vision: new Set(), Supplemental: new Set() };
+        companyPlanTypeEnrolled.set(clientId, cpt);
+      }
+      for (const empId of entry.enrolledSet) {
+        if (cpt[category]) cpt[category].add(empId);
+      }
+    }
+  }
+
+  // Build rows
+  const rows = Array.from(carrierMap.values())
+    .filter(e => e.eligibleEmployees.size > 0)
+    .map(e => ({
+      carrier: e.carrier,
+      groups: carrierCompanies.get(e.carrier)?.size || 0,
+      eligible: e.eligibleEmployees.size,
+      enrolled: e.enrolledEmployees.size,
+      monthlyPremium: Math.round(e.monthlyPremium * 100) / 100,
+    }))
+    .sort((a, b) => b.monthlyPremium - a.monthlyPremium);
+
+  const totals = {
+    groups: totalCompanies,
+    eligible: rows.reduce((s, r) => s + r.eligible, 0),
+    enrolled: rows.reduce((s, r) => s + r.enrolled, 0),
+    monthlyPremium: Math.round(rows.reduce((s, r) => s + r.monthlyPremium, 0) * 100) / 100,
+  };
+
+  // Reconciliation
+  const carrierAudit = Array.from(carrierMap.values())
+    .filter(e => e.eligibleEmployees.size > 0)
+    .map(e => ({
+      carrier: e.carrier,
+      eligible: e.eligibleEmployees.size,
+      enrolled: e.enrolledEmployees.size,
+      enrollmentRows: e.enrollmentRows,
+      monthlyPremium: Math.round(e.monthlyPremium * 100) / 100,
+    }))
+    .sort((a, b) => b.monthlyPremium - a.monthlyPremium);
+
+  const companyEligibility: any[] = [];
+  for (const [carrier, clientIds] of carrierCompanies) {
+    for (const clientId of clientIds) {
+      const info = companyInfo.get(clientId);
+      if (!info) continue;
+      companyEligibility.push({
+        carrier, companyId: clientId, companyName: info.groupName,
+        activeEmployees: info.activeEmployees.size, hasCarrierPlan: true,
+        eligibleContributed: info.activeEmployees.size,
+      });
+    }
+  }
+  companyEligibility.sort((a: any, b: any) => a.carrier.localeCompare(b.carrier) || a.companyName.localeCompare(b.companyName));
+
+  const companyEnrollment: any[] = [];
+  for (const [key, data] of companyCarrierData) {
+    const [carrier, clientId] = key.split("::");
+    const info = companyInfo.get(clientId);
+    companyEnrollment.push({
+      carrier, companyId: clientId, companyName: info?.groupName || clientId,
+      enrolled: data.distinctEnrolled.size, enrollmentRows: data.enrollmentRows,
+      premium: Math.round(data.premium * 100) / 100,
+    });
+  }
+  companyEnrollment.sort((a: any, b: any) => b.premium - a.premium);
+
+  // Company plan types
+  const companyPlanTypes: Record<string, any> = {};
+  for (const [clientId, info] of companyInfo) {
+    const planTypes = companyPlanTypeEnrolled.get(clientId);
+    let companyPremium = 0;
+    for (const [key, data] of companyCarrierData) {
+      if (key.endsWith(`::${clientId}`)) companyPremium += data.premium;
+    }
+    companyPlanTypes[clientId] = {
+      activeEmployees: info.activeEmployees.size,
+      medical: planTypes?.Medical?.size ?? 0,
+      dental: planTypes?.Dental?.size ?? 0,
+      vision: planTypes?.Vision?.size ?? 0,
+      supplemental: planTypes?.Supplemental?.size ?? 0,
+      premium: Math.round(companyPremium * 100) / 100,
+    };
+  }
+
+  // YoY from previous period
+  let prevTotalCompanies = 0, prevTotalActiveEmployees = 0, prevTotalPremium = 0;
+  for (const snap of prevSnaps) {
+    prevTotalCompanies++;
+    for (const entry of snap.agg.values()) {
+      prevTotalPremium += entry.premium;
+      prevTotalActiveEmployees += entry.enrolledSet.size;
+    }
+  }
+
+  const totalActiveEmployees = Array.from(companyInfo.values()).reduce((s, c) => s + c.activeEmployees.size, 0);
+  const dataPeriod = `${latestYear}-${String(latestMonth).padStart(2, "0")}`;
+  const prevPeriod = prevYear > 0 ? `${prevYear}-${String(prevMonth).padStart(2, "0")}` : null;
+
+  return {
+    rows, totals,
+    lastUpload: latestImportDate?.toISOString() || null,
+    dataPeriod,
+    reconciliation: {
+      totalActiveEmployees, totalCompanies,
+      totalPlansInMap: 0,
+      carrierAudit, companyEligibility, companyEnrollment,
+      exceptions: { missingPlanIdentifier: 0, unmatchedPlanIdentifier: 0, fallbackPlanNameMatch: 0, currentEnrollmentsWithEndDate: 0, blankOrInvalidPlanCost: 0 },
+    },
+    companyPlanTypes,
+    yoy: {
+      currentYear: latestYear, previousYear: prevYear || null,
+      currentPeriod: dataPeriod, previousPeriod: prevPeriod,
+      current: { activeGroups: totalCompanies, activeEmployees: totalActiveEmployees, premium: totals.monthlyPremium },
+      previous: { activeGroups: prevTotalCompanies, activeEmployees: prevTotalActiveEmployees, premium: Math.round(prevTotalPremium * 100) / 100 },
+    },
+  };
+}
+
 // ─── Public API ──────────────────────────────────────────────────────────────
 
 export async function rebuildAllCaches(): Promise<{ timings: Record<string, number> }> {
@@ -432,25 +656,31 @@ export async function rebuildAllCaches(): Promise<{ timings: Record<string, numb
 
   const timings: Record<string, number> = { processSnapshots: processTime };
 
-  // Build and store each report
-  const reports: [string, () => any][] = [
+  // Build all reports in parallel (CPU-bound, no I/O)
+  const builders: [string, () => any][] = [
     ["production", () => buildProductionReport(snapshots)],
     ["dashboard", () => buildDashboard(snapshots)],
     ["income", () => buildIncomeReport(snapshots)],
+    ["benefits", () => buildBenefitsReport(snapshots)],
   ];
 
-  for (const [key, builder] of reports) {
+  const built = builders.map(([key, builder]) => {
     const start = Date.now();
     const data = builder();
-    const buildTime = Date.now() - start;
-    timings[key] = buildTime;
+    timings[key] = Date.now() - start;
+    return { key, data };
+  });
 
-    await prisma.reportCache.upsert({
-      where: { key },
-      create: { key, data: JSON.stringify(data), buildTimeMs: processTime + buildTime },
-      update: { data: JSON.stringify(data), builtAt: new Date(), buildTimeMs: processTime + buildTime },
-    });
-  }
+  // Store all reports in parallel (I/O-bound)
+  await Promise.all(
+    built.map(({ key, data }) =>
+      prisma.reportCache.upsert({
+        where: { key },
+        create: { key, data: JSON.stringify(data), buildTimeMs: processTime + (timings[key] || 0) },
+        update: { data: JSON.stringify(data), builtAt: new Date(), buildTimeMs: processTime + (timings[key] || 0) },
+      })
+    )
+  );
 
   return { timings };
 }

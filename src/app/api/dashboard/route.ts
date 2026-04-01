@@ -17,7 +17,9 @@ export async function GET() {
       return NextResponse.json({ kpi: null, premiumTrend: [], topCarriers: [], lobBreakdown: [], yoySummary: [], totalPeriods: 0 });
     }
 
-    return NextResponse.json(data);
+    return NextResponse.json(data, {
+      headers: { "Cache-Control": "private, max-age=300" },
+    });
   } catch (error) {
     console.error("Dashboard API error:", error);
     return NextResponse.json({ error: "Failed to generate dashboard data" }, { status: 500 });
