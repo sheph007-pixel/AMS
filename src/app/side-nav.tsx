@@ -45,6 +45,18 @@ const bookOfBusinessItems = [
   },
 ];
 
+const analyticsItems = [
+  {
+    href: "/analyst",
+    label: "AI Analyst",
+    icon: (active: boolean) => (
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke={active ? "#7C5CFC" : "#9CA3AF"} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M12 2L2 7l10 5 10-5-10-5z" /><path d="M2 17l10 5 10-5" /><path d="M2 12l10 5 10-5" />
+      </svg>
+    ),
+  },
+];
+
 const financialsItems = [
   {
     href: "/financials",
@@ -261,6 +273,23 @@ export function SideNav() {
               key={item.href}
               item={item}
               isActive={isActive(item.href, (item as { matchExact?: boolean }).matchExact)}
+              showLabels={showLabels}
+              onClick={() => setMobileOpen(false)}
+            />
+          ))}
+        </div>
+
+        {/* ANALYTICS Section */}
+        <div className={`my-3 ${!showLabels ? "px-4" : "px-5"}`}>
+          <div className="border-t border-bob-border" />
+        </div>
+        <div className={`flex flex-col gap-0.5 ${!showLabels ? "items-center px-2" : "px-3"}`}>
+          <SectionLabel label="Analytics" showLabels={showLabels} />
+          {analyticsItems.map((item) => (
+            <NavLink
+              key={item.href}
+              item={item}
+              isActive={isActive(item.href)}
               showLabels={showLabels}
               onClick={() => setMobileOpen(false)}
             />

@@ -3,7 +3,7 @@
 import { useEffect, useState, useRef } from "react";
 import {
   ArrowLeft, Search, Download, Printer, ArrowUpDown, ArrowUp, ArrowDown,
-  ChevronDown, ChevronRight, Info,
+  ChevronDown, ChevronRight, Info, Sparkles, Loader2,
 } from "lucide-react";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -137,7 +137,7 @@ function toExcelXML(rows: ProductionRow[], summary: Summary | null, methodology:
   xml += blankRow();
   xml += `<Row>${cell("Report Generated:", "Bold")}${cell(new Date().toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric", hour: "2-digit", minute: "2-digit" }))}</Row>`;
   xml += `<Row>${cell("Prepared By:", "Bold")}${cell("Kennion Agency Management System")}</Row>`;
-  xml += `<Row>${cell("Agency:", "Bold")}${cell("Kennion Benefits / NIA")}</Row>`;
+  xml += `<Row>${cell("Agency:", "Bold")}${cell("Kennion")}</Row>`;
   if (summary) {
     xml += `<Row>${cell("Period Covered:", "Bold")}${cell(`${summary.totalPeriods} months of enrollment data`)}</Row>`;
     xml += `<Row>${cell("Total Clients:", "Bold")}${cell(String(summary.totalClients))}</Row>`;
@@ -201,7 +201,7 @@ function toExcelXML(rows: ProductionRow[], summary: Summary | null, methodology:
     ["Agency Code", "Agency identifier", "KENNION"],
     ["Bill Type", "Billing method", "Direct"],
     ["Producer", "Producing agent", "Kennion Benefits"],
-    ["Broker", "Broker of record", "Kennion Benefits / NIA"],
+    ["Broker", "Broker of record", "Kennion"],
     ["Department", "Internal department", "Not tracked in EN"],
   ];
   for (const [col, desc, src] of dictEntries) {
@@ -330,6 +330,8 @@ export default function ProductionReportPage() {
   const [sortKey, setSortKey] = useState<SortKey>("transactionDate");
   const [sortDir, setSortDir] = useState<SortDir>("asc");
   const [exportOpen, setExportOpen] = useState(false);
+  const [aiAudit, setAiAudit] = useState<string | null>(null);
+  const [aiAuditLoading, setAiAuditLoading] = useState(false);
   const tableRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -424,13 +426,64 @@ export default function ProductionReportPage() {
         @media print { body { padding: 0; } }
       </style></head><body>
       <h1>Production Report — Kennion AMS</h1>
-      <div class="sub">Fiscal Years 2022–2025 | Kennion Benefits / NIA</div>
+      <div class="sub">Fiscal Years 2022–2025 | Kennion</div>
       ${tableHTML}
       </body></html>
     `);
     printWindow.document.close();
     printWindow.print();
     setExportOpen(false);
+  }
+
+  async function runAiAudit() {
+    if (!summary || !audit || !methodology || aiAuditLoading) return;
+    setAiAuditLoading(true);
+    setAiAudit(null);
+
+    // Build year breakdown
+    const yearMap = new Map<number, { clients: Set<string>; premium: number; fee: number; enrolled: number }>();
+    for (const r of rows) {
+      let y = yearMap.get(r.year);
+      if (!y) { y = { clients: new Set(), premium: 0, fee: 0, enrolled: 0 }; yearMap.set(r.year, y); }
+      y.clients.add(r.clientCode);
+      y.premium += r.monthlyPremium;
+      y.fee += r.estMonthlyFee;
+      y.enrolled += r.enrolled;
+    }
+    const yearBreakdown = Array.from(yearMap.entries())
+      .sort((a, b) => a[0] - b[0])
+      .map(([year, d]) => `${year}: ${d.clients.size} clients, $${d.premium.toFixed(2)} premium, $${d.fee.toFixed(2)} fees, ${d.enrolled} enrolled`)
+      .join("\n");
+
+    // Build carrier breakdown
+    const carrierMap = new Map<string, { premium: number; fee: number; enrolled: number }>();
+    for (const r of rows) {
+      let c = carrierMap.get(r.carrier);
+      if (!c) { c = { premium: 0, fee: 0, enrolled: 0 }; carrierMap.set(r.carrier, c); }
+      c.premium += r.monthlyPremium;
+      c.fee += r.estMonthlyFee;
+      c.enrolled += r.enrolled;
+    }
+    const carrierBreakdown = Array.from(carrierMap.entries())
+      .sort((a, b) => b[1].premium - a[1].premium)
+      .map(([carrier, d]) => `${carrier}: $${d.premium.toFixed(2)} premium, $${d.fee.toFixed(2)} fees, ${d.enrolled} enrolled`)
+      .join("\n");
+
+    try {
+      const res = await fetch("/api/ai/audit", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ summary, audit, methodology, yearBreakdown, carrierBreakdown }),
+      });
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
+      setAiAudit(data.analysis);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Failed to run AI audit";
+      setAiAudit(`Error: ${msg}`);
+    } finally {
+      setAiAuditLoading(false);
+    }
   }
 
   // ─── Render ─────────────────────────────────────────────────────────────────
@@ -662,6 +715,61 @@ export default function ProductionReportPage() {
         </div>
       )}
 
+      {/* AI-Powered Audit */}
+      <div className="bg-white rounded-2xl border border-bob-border overflow-hidden mb-6">
+        <div className="px-5 py-4 border-b border-bob-border flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-bob-purple/20 to-bob-blue/20 flex items-center justify-center">
+              <Sparkles className="w-4 h-4 text-bob-purple" />
+            </div>
+            <div>
+              <h2 className="text-sm font-semibold text-bob-text">AI Audit Analysis</h2>
+              <p className="text-xs text-bob-text-soft">GPT-4o reviews your production data for quality, trends, and insights</p>
+            </div>
+          </div>
+          <button
+            onClick={runAiAudit}
+            disabled={aiAuditLoading || !summary || !audit}
+            className={`flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold transition-all duration-200 ${
+              aiAuditLoading
+                ? "bg-gray-100 text-gray-400"
+                : "bg-gradient-to-r from-bob-purple to-bob-blue text-white hover:shadow-md hover:scale-[1.02]"
+            }`}
+          >
+            {aiAuditLoading ? (
+              <><Loader2 className="w-3.5 h-3.5 animate-spin" /> Analyzing...</>
+            ) : aiAudit ? (
+              <><Sparkles className="w-3.5 h-3.5" /> Re-run Audit</>
+            ) : (
+              <><Sparkles className="w-3.5 h-3.5" /> Run AI Audit</>
+            )}
+          </button>
+        </div>
+        {aiAudit && (
+          <div className="p-5">
+            <div
+              className="prose-sm max-w-none text-sm text-bob-text [&_h1]:text-base [&_h1]:font-bold [&_h1]:mt-4 [&_h1]:mb-2 [&_h2]:text-sm [&_h2]:font-bold [&_h2]:mt-3 [&_h2]:mb-1 [&_h3]:text-sm [&_h3]:font-semibold [&_h3]:mt-2 [&_h3]:mb-1 [&_strong]:font-semibold [&_li]:ml-4 [&_li]:list-disc [&_p]:mb-2"
+              dangerouslySetInnerHTML={{
+                __html: aiAudit
+                  .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+                  .replace(/^### (.+)$/gm, '<h3>$1</h3>')
+                  .replace(/^## (.+)$/gm, '<h2>$1</h2>')
+                  .replace(/^# (.+)$/gm, '<h1>$1</h1>')
+                  .replace(/^- (.+)$/gm, '<li>$1</li>')
+                  .replace(/^\d+\. (.+)$/gm, '<li style="list-style-type:decimal">$1</li>')
+                  .replace(/\n\n/g, '</p><p>')
+                  .replace(/\n/g, '<br/>'),
+              }}
+            />
+          </div>
+        )}
+        {!aiAudit && !aiAuditLoading && (
+          <div className="px-5 py-8 text-center text-sm text-bob-text-soft">
+            Click &ldquo;Run AI Audit&rdquo; to have GPT-4o analyze your production data for quality, trends, and due diligence insights.
+          </div>
+        )}
+      </div>
+
       {/* Data Source Note */}
       <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 mb-6 flex gap-3">
         <Info className="w-5 h-5 text-blue-600 flex-shrink-0 mt-0.5" />
@@ -731,7 +839,7 @@ export default function ProductionReportPage() {
                   ["Agency Code", "Agency identifier", "KENNION (single agency)"],
                   ["Bill Type", "How the client is billed", "Direct (billed through Employee Navigator)"],
                   ["Producer", "Producing broker/agent", "Kennion Benefits (house account)"],
-                  ["Broker", "Broker of record for the group", "Kennion Benefits / NIA"],
+                  ["Broker", "Broker of record for the group", "Kennion"],
                   ["Department", "Internal department code", "Not tracked in enrollment system"],
                 ].map(([col, desc, src], i) => (
                   <tr key={i} className="hover:bg-gray-50">

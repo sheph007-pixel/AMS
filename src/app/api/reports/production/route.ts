@@ -231,7 +231,7 @@ export async function GET() {
           agencyCode: "KENNION",
           billType: "Direct",
           producer: "Kennion Benefits",
-          broker: "Kennion Benefits / NIA",
+          broker: "Kennion",
           department: "",
         });
       }
