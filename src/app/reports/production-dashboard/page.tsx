@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useMemo, useRef, useCallback } from "react";
 import {
-  ArrowLeft, Download, Search, ArrowUpDown, ArrowUp, ArrowDown,
+  Download, Search, ArrowUpDown, ArrowUp, ArrowDown,
   Settings2, Save, Plus, Trash2, X, ChevronDown,
 } from "lucide-react";
 
@@ -457,10 +457,6 @@ export default function ProductionDashboardPage() {
 
   return (
     <div>
-      <a href="/reports" className="inline-flex items-center gap-1.5 text-sm text-bob-text-soft hover:text-bob-purple transition-colors duration-200 mb-4">
-        <ArrowLeft className="w-4 h-4" /> Back to Reports
-      </a>
-
       <div className="mb-6">
         <h1 className="text-3xl font-bold tracking-tight text-bob-text">Production Report</h1>
         <p className="text-bob-text-soft mt-1">

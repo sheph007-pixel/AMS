@@ -14,56 +14,13 @@ export function useSidebar() {
 
 // ─── Nav items ───────────────────────────────────────────────────────────────
 
-const bookOfBusinessItems = [
+const mainNavItems = [
   {
-    href: "/",
-    label: "Dashboard",
-    matchExact: true,
+    href: "/reports/production-dashboard",
+    label: "Production Report",
     icon: (active: boolean) => (
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke={active ? "#7C5CFC" : "#9CA3AF"} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-        <rect x="3" y="3" width="7" height="9" rx="1" /><rect x="14" y="3" width="7" height="5" rx="1" /><rect x="14" y="12" width="7" height="9" rx="1" /><rect x="3" y="16" width="7" height="5" rx="1" />
-      </svg>
-    ),
-  },
-  {
-    href: "/groups",
-    label: "Groups",
-    icon: (active: boolean) => (
-      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke={active ? "#7C5CFC" : "#9CA3AF"} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-        <rect x="3" y="3" width="7" height="7" rx="1.5" /><rect x="14" y="3" width="7" height="7" rx="1.5" /><rect x="3" y="14" width="7" height="7" rx="1.5" /><rect x="14" y="14" width="7" height="7" rx="1.5" />
-      </svg>
-    ),
-  },
-  {
-    href: "/reports",
-    label: "Reports",
-    icon: (active: boolean) => (
-      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke={active ? "#7C5CFC" : "#9CA3AF"} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z" /><polyline points="14 2 14 8 20 8" /><line x1="16" y1="13" x2="8" y2="13" /><line x1="16" y1="17" x2="8" y2="17" /><polyline points="10 9 9 9 8 9" />
-      </svg>
-    ),
-  },
-];
-
-const analyticsItems = [
-  {
-    href: "/analyst",
-    label: "AI Analyst",
-    icon: (active: boolean) => (
-      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke={active ? "#7C5CFC" : "#9CA3AF"} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-        <path d="M12 2L2 7l10 5 10-5-10-5z" /><path d="M2 17l10 5 10-5" /><path d="M2 12l10 5 10-5" />
-      </svg>
-    ),
-  },
-];
-
-const financialsItems = [
-  {
-    href: "/financials",
-    label: "Overview",
-    icon: (active: boolean) => (
-      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke={active ? "#7C5CFC" : "#9CA3AF"} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-        <line x1="12" y1="1" x2="12" y2="23" /><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6" />
+        <rect x="3" y="3" width="18" height="18" rx="2" /><path d="M3 9h18" /><path d="M9 21V9" />
       </svg>
     ),
   },
@@ -265,44 +222,9 @@ export function SideNav() {
           </button>
         )}
 
-        {/* BOOK OF BUSINESS Section */}
+        {/* Main Nav */}
         <div className={`flex flex-col gap-0.5 ${!showLabels ? "items-center px-2" : "px-3"}`}>
-          <SectionLabel label="Book of Business" showLabels={showLabels} />
-          {bookOfBusinessItems.map((item) => (
-            <NavLink
-              key={item.href}
-              item={item}
-              isActive={isActive(item.href, (item as { matchExact?: boolean }).matchExact)}
-              showLabels={showLabels}
-              onClick={() => setMobileOpen(false)}
-            />
-          ))}
-        </div>
-
-        {/* ANALYTICS Section */}
-        <div className={`my-3 ${!showLabels ? "px-4" : "px-5"}`}>
-          <div className="border-t border-bob-border" />
-        </div>
-        <div className={`flex flex-col gap-0.5 ${!showLabels ? "items-center px-2" : "px-3"}`}>
-          <SectionLabel label="Analytics" showLabels={showLabels} />
-          {analyticsItems.map((item) => (
-            <NavLink
-              key={item.href}
-              item={item}
-              isActive={isActive(item.href)}
-              showLabels={showLabels}
-              onClick={() => setMobileOpen(false)}
-            />
-          ))}
-        </div>
-
-        {/* FINANCIALS Section */}
-        <div className={`my-3 ${!showLabels ? "px-4" : "px-5"}`}>
-          <div className="border-t border-bob-border" />
-        </div>
-        <div className={`flex flex-col gap-0.5 ${!showLabels ? "items-center px-2" : "px-3"}`}>
-          <SectionLabel label="Financials" showLabels={showLabels} />
-          {financialsItems.map((item) => (
+          {mainNavItems.map((item) => (
             <NavLink
               key={item.href}
               item={item}
