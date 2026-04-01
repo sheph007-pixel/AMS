@@ -249,12 +249,12 @@ export default function ProductionReportPage() {
   }
 
   function handleCSV() {
-    downloadFile(toCSV(sorted), "production-report-reagan.csv", "text/csv");
+    downloadFile(toCSV(sorted), "kennion-ams-production-report.csv", "text/csv");
     setExportOpen(false);
   }
 
   function handleExcel() {
-    downloadFile(toExcelXML(sorted), "production-report-reagan.xls", "application/vnd.ms-excel");
+    downloadFile(toExcelXML(sorted), "kennion-ams-production-report.xls", "application/vnd.ms-excel");
     setExportOpen(false);
   }
 
@@ -263,7 +263,7 @@ export default function ProductionReportPage() {
     if (!printWindow) return;
     const tableHTML = tableRef.current?.querySelector("table")?.outerHTML || "";
     printWindow.document.write(`
-      <html><head><title>Production Report — Reagan Consulting</title>
+      <html><head><title>Production Report — Kennion AMS</title>
       <style>
         body { font-family: system-ui, sans-serif; padding: 20px; }
         h1 { font-size: 18px; margin-bottom: 4px; }
@@ -273,7 +273,7 @@ export default function ProductionReportPage() {
         th { background: #f5f5f5; font-weight: 600; }
         @media print { body { padding: 0; } }
       </style></head><body>
-      <h1>Production Report — Reagan Consulting</h1>
+      <h1>Production Report — Kennion AMS</h1>
       <div class="sub">Fiscal Years 2022–2025 | Kennion Benefits / NIA</div>
       ${tableHTML}
       </body></html>
@@ -306,7 +306,7 @@ export default function ProductionReportPage() {
         </a>
         <h1 className="text-3xl font-bold tracking-tight text-bob-text">Production Report</h1>
         <p className="text-bob-text-soft mt-1">
-          Full production detail for Reagan Consulting — fiscal years 2022–2025
+          Full production detail — all carriers, clients, premiums, and fees across fiscal years 2022–present
         </p>
       </div>
 
@@ -452,18 +452,18 @@ export default function ProductionReportPage() {
         )}
       </div>
 
-      {/* Reagan-Specific Note */}
-      <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 mb-6 flex gap-3">
-        <Info className="w-5 h-5 text-amber-600 flex-shrink-0 mt-0.5" />
-        <div className="text-sm text-amber-900">
-          <p className="font-semibold mb-1">Note for Reagan Consulting</p>
+      {/* Data Source Note */}
+      <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 mb-6 flex gap-3">
+        <Info className="w-5 h-5 text-blue-600 flex-shrink-0 mt-0.5" />
+        <div className="text-sm text-blue-900">
+          <p className="font-semibold mb-1">Data Source & Reconciliation</p>
           <p>
-            This production report is generated from Employee Navigator enrollment data — our source system for
-            billing and collecting premiums from all clients each month. Estimated commissions/fees use our standard
-            fee model (PEPM for EBPA/HealthEZ, commission % for Guardian/VSP). <strong>Actual collected revenue
-            is tracked in Kennion/NIA financial statements</strong> and will be provided separately. Variances
-            between this report and financials are expected due to timing differences, retroactive adjustments,
-            mid-month changes, and billing cycles.
+            Production data is sourced from Employee Navigator — the enrollment and billing platform used to
+            administer all client benefit plans. Premium figures represent monthly billing amounts. Estimated
+            commissions and fees use our standard fee schedule: PEPM carriers at $20/enrolled employee/month,
+            commission carriers at 10% of premium. <strong>Actual collected revenue is recorded in
+            Kennion/NIA financial statements</strong> and may differ due to timing, retroactive adjustments,
+            mid-month enrollment changes, and carrier payment cycles.
           </p>
         </div>
       </div>

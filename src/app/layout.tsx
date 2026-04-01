@@ -5,8 +5,8 @@ import { MainContent } from "./main-content";
 import { UploadProvider } from "./upload-context";
 
 export const metadata: Metadata = {
-  title: "Kennion Program Manager",
-  description: "Client-centric program management system",
+  title: "Kennion AMS",
+  description: "Kennion Agency Management System — Production tracking, benefits administration, and financial reporting",
 };
 
 export const viewport: Viewport = {

@@ -94,3 +94,86 @@ model EmployeeSnapshot {
 
   @@unique([clientSnapshotId, employeeId])
 }
+
+// ─── Financial Data Models ───────────────────────────────────────────────────
+
+/// Business entity — Kennion or NIA.
+model FinancialEntity {
+  id          String   @id @default(cuid())
+  name        String   @unique /// "Kennion" or "NIA"
+  description String?
+
+  accounts     ChartOfAccounts[]
+  transactions FinancialTransaction[]
+  statements   FinancialStatement[]
+  summaries    FinancialSummary[]
+}
+
+/// Chart of accounts from QuickBooks.
+model ChartOfAccounts {
+  id            String  @id @default(cuid())
+  entityId      String
+  accountNumber String
+  accountName   String
+  accountType   String  /// Asset, Liability, Equity, Revenue, Expense
+  parentAccount String?
+
+  entity       FinancialEntity        @relation(fields: [entityId], references: [id], onDelete: Cascade)
+  transactions FinancialTransaction[]
+  summaries    FinancialSummary[]
+
+  @@unique([entityId, accountNumber])
+}
+
+/// General ledger transaction detail rows.
+model FinancialTransaction {
+  id              String @id @default(cuid())
+  entityId        String
+  accountId       String
+  year            Int
+  month           Int
+  date            String
+  transactionType String  /// Invoice, Check, Journal Entry, etc.
+  reference       String?
+  memo            String?
+  debit           Float   @default(0)
+  credit          Float   @default(0)
+  metadata        String?
+
+  entity  FinancialEntity @relation(fields: [entityId], references: [id], onDelete: Cascade)
+  account ChartOfAccounts @relation(fields: [accountId], references: [id], onDelete: Cascade)
+}
+
+/// Tracking record for uploaded financial statements.
+model FinancialStatement {
+  id            String   @id @default(cuid())
+  entityId      String
+  statementType String   /// income_statement, balance_sheet, general_ledger
+  year          Int
+  month         Int      @default(0)
+  fileName      String
+  rowCount      Int      @default(0)
+  importedAt    DateTime @default(now())
+  metadata      String?
+
+  entity FinancialEntity @relation(fields: [entityId], references: [id], onDelete: Cascade)
+
+  @@unique([entityId, statementType, year, month])
+}
+
+/// Pre-aggregated monthly financial summary line items.
+model FinancialSummary {
+  id            String @id @default(cuid())
+  entityId      String
+  statementType String
+  accountId     String
+  year          Int
+  month         Int
+  amount        Float
+  metadata      String?
+
+  entity  FinancialEntity @relation(fields: [entityId], references: [id], onDelete: Cascade)
+  account ChartOfAccounts @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  @@unique([entityId, accountId, year, month, statementType])
+}
