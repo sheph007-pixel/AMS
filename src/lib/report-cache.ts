@@ -602,6 +602,243 @@ function buildBenefitsReport(snapshots: ProcessedSnapshot[]) {
   };
 }
 
+// ─── Build Production Dashboard (Tier-Level Detail) ─────────────────────────
+
+/**
+ * Processes employee enrollment metadata ONE snapshot at a time to build
+ * per-plan, per-coverage-tier rows. This is memory-safe because we only
+ * load one snapshot's employees at a time, then discard before the next.
+ */
+async function buildProductionDashboard(): Promise<any> {
+  const exclusionRules = await getExclusionRules();
+
+  // Load carrier settings
+  const carrierSettings = await prisma.carrierSetting.findMany();
+  const csMap = new Map<string, { incomeMethod: string; rate: number }>();
+  for (const cs of carrierSettings) {
+    csMap.set(cs.carrierName.toLowerCase(), { incomeMethod: cs.incomeMethod, rate: cs.rate });
+  }
+
+  // Load lightweight snapshot list (NO employee data yet)
+  const snapshotList = await prisma.clientSnapshot.findMany({
+    where: { year: { gte: 2022 } },
+    select: {
+      id: true, year: true, month: true,
+      client: { select: { groupId: true, groupName: true } },
+      benefitPlans: {
+        select: { planType: true, carrier: true, planName: true, metadata: true },
+      },
+    },
+    orderBy: [{ year: "asc" }, { month: "asc" }],
+  });
+
+  const rows: any[] = [];
+  const carriersSet = new Set<string>();
+  const clientsSet = new Set<string>();
+  const coverageTypesSet = new Set<string>();
+  const periodsSet = new Set<string>();
+  const policyNumbersSet = new Set<string>();
+
+  // Process each snapshot individually
+  for (const snap of snapshotList) {
+    if (isExcluded({ groupName: snap.client.groupName }, exclusionRules)) continue;
+
+    const period = `${snap.year}-${String(snap.month).padStart(2, "0")}`;
+
+    // Build plan lookup
+    const planIdMap = new Map<string, { carrier: string; planType: string; planName: string; policyNumber: string }>();
+    const planNameMap = new Map<string, { carrier: string; planType: string; planName: string; policyNumber: string }>();
+    let hasPlans = false;
+
+    for (const bp of snap.benefitPlans) {
+      if (isExcluded({ carrier: bp.carrier, planName: bp.planName, planType: bp.planType }, exclusionRules)) continue;
+      if (bp.planType?.toLowerCase() === "cobra") continue;
+
+      let planMeta: any = {};
+      try { planMeta = bp.metadata ? JSON.parse(bp.metadata) : {}; } catch { /* */ }
+
+      const policyNumber = getField(planMeta,
+        "PlanIdentifier", "PolicyNumber", "GroupPolicyNumber",
+        "ContractNumber", "GroupNumber", "PlanNumber", "PlanId", "PlanID"
+      ) || "";
+
+      const info = { carrier: bp.carrier || "Unspecified", planType: bp.planType || "Unknown", planName: bp.planName || "", policyNumber };
+      if (policyNumber) planIdMap.set(policyNumber, info);
+      if (bp.planName) planNameMap.set(bp.planName, info);
+      hasPlans = true;
+    }
+
+    if (!hasPlans) continue;
+
+    // Load employees for THIS snapshot only (memory-safe batch)
+    const employees = await prisma.employeeSnapshot.findMany({
+      where: { clientSnapshotId: snap.id },
+      select: { status: true, metadata: true },
+    });
+
+    // Aggregate by plan + tier
+    const tierAgg = new Map<string, {
+      carrier: string; planType: string; planName: string; policyNumber: string;
+      grouping: string; rates: number[]; benefitAmounts: number[];
+      lives: number; totalPremium: number;
+    }>();
+
+    for (const emp of employees) {
+      if ((emp.status || "Active").toLowerCase() !== "active") continue;
+
+      let empMeta: any;
+      try { empMeta = emp.metadata ? JSON.parse(emp.metadata) : null; } catch { continue; }
+      if (!empMeta) continue;
+
+      const enrollments = findEnrollments(empMeta);
+      const seen = new Set<string>();
+
+      for (const enrollment of enrollments) {
+        if (!qualifyEnrollment(enrollment)) continue;
+
+        const enrollPlanId = getField(enrollment, "PlanIdentifier", "PlanId", "PlanID") || "";
+        const enrollPlanName = getField(enrollment, "PlanName", "Plan", "Name") || "";
+        const planKey = enrollPlanId || enrollPlanName;
+        if (!planKey) continue;
+
+        const planInfo = (enrollPlanId && planIdMap.get(enrollPlanId))
+          || (enrollPlanName && planNameMap.get(enrollPlanName))
+          || null;
+        if (!planInfo) continue;
+
+        const coverageTier = getField(enrollment,
+          "CoverageLevel", "Tier", "CoverageTier", "CoverageDescription",
+          "TierName", "RateTier", "AgeBand"
+        ) || "Employee";
+
+        const dedupeKey = `${planKey}||${coverageTier}`;
+        if (seen.has(dedupeKey)) continue;
+        seen.add(dedupeKey);
+
+        const planCost = (() => {
+          const raw = getField(enrollment,
+            "PlanCost", "MonthlyPlanCost", "TotalPremium", "Premium",
+            "MonthlyPremium", "TotalMonthlyPremium", "Cost");
+          if (!raw) return 0;
+          const v = parseFloat(raw);
+          return isNaN(v) || v <= 0 ? 0 : v;
+        })();
+
+        const rate = (() => {
+          const raw = getField(enrollment,
+            "Rate", "EmployeeRate", "MonthlyRate", "PlanRate", "TierRate",
+            "PlanCost", "MonthlyPlanCost", "Premium");
+          if (!raw) return 0;
+          const v = parseFloat(raw);
+          return isNaN(v) || v <= 0 ? 0 : v;
+        })();
+
+        const benefitAmt = (() => {
+          const raw = getField(enrollment,
+            "BenefitAmount", "CoverageAmount", "Volume", "Amount",
+            "FaceAmount", "BenefitVolume", "ApprovedAmount");
+          if (!raw) return 0;
+          const v = parseFloat(raw);
+          return isNaN(v) || v <= 0 ? 0 : v;
+        })();
+
+        const aggKey = `${planInfo.policyNumber || planKey}||${planInfo.planName}||${coverageTier}`;
+        let agg = tierAgg.get(aggKey);
+        if (!agg) {
+          agg = {
+            carrier: planInfo.carrier, planType: planInfo.planType,
+            planName: planInfo.planName, policyNumber: planInfo.policyNumber,
+            grouping: coverageTier, rates: [], benefitAmounts: [],
+            lives: 0, totalPremium: 0,
+          };
+          tierAgg.set(aggKey, agg);
+        }
+        agg.lives += 1;
+        agg.totalPremium += planCost;
+        if (rate > 0) agg.rates.push(rate);
+        if (benefitAmt > 0) agg.benefitAmounts.push(benefitAmt);
+      }
+    }
+
+    // Convert to rows
+    for (const agg of tierAgg.values()) {
+      // Mode of rates
+      let tierRate = 0;
+      if (agg.rates.length > 0) {
+        const freq = new Map<number, number>();
+        for (const r of agg.rates) { const rd = Math.round(r * 1000) / 1000; freq.set(rd, (freq.get(rd) || 0) + 1); }
+        let mf = 0; for (const [r, f] of freq) { if (f > mf) { mf = f; tierRate = r; } }
+      }
+
+      let benefitAmount = 0;
+      if (agg.benefitAmounts.length > 0) {
+        const freq = new Map<number, number>();
+        for (const a of agg.benefitAmounts) { freq.set(a, (freq.get(a) || 0) + 1); }
+        let mf = 0; for (const [a, f] of freq) { if (f > mf) { mf = f; benefitAmount = a; } }
+      }
+
+      const monthlyPremium = Math.round(agg.totalPremium * 100) / 100;
+      const lives = agg.lives;
+      const carrier = agg.carrier;
+
+      const setting = csMap.get(carrier.toLowerCase());
+      let incomeMethod = "NONE", feeRate = 0, income = 0;
+      if (setting) {
+        incomeMethod = setting.incomeMethod;
+        feeRate = setting.rate;
+        if (incomeMethod === "PEPM") income = Math.round(lives * feeRate * 100) / 100;
+        else if (incomeMethod === "PERCENT_PREMIUM") income = Math.round(monthlyPremium * (feeRate / 100) * 100) / 100;
+      }
+
+      periodsSet.add(period);
+      carriersSet.add(carrier);
+      clientsSet.add(snap.client.groupName);
+      coverageTypesSet.add(agg.planType);
+      if (agg.policyNumber) policyNumbersSet.add(agg.policyNumber);
+
+      rows.push({
+        month: period, year: snap.year, monthNum: snap.month,
+        clientName: snap.client.groupName, clientCode: snap.client.groupId,
+        carrier, policyNumber: agg.policyNumber, planName: agg.planName,
+        grouping: agg.grouping, rate: tierRate, lives, benefitAmount,
+        monthlyPremium, incomeMethod, feeRate,
+        feeRateDisplay: incomeMethod === "PEPM" ? `$${feeRate}` : incomeMethod === "PERCENT_PREMIUM" ? `${feeRate}%` : "",
+        income, coverageType: agg.planType,
+        transactionDate: `${snap.year}-${String(snap.month).padStart(2, "0")}-01`,
+        lineOfBusiness: agg.planType, sourceMonth: period,
+      });
+    }
+  }
+
+  const sortedPeriods = Array.from(periodsSet).sort();
+  const fiscalYears = Array.from(new Set(sortedPeriods.map(p => parseInt(p.split("-")[0])))).sort();
+
+  return {
+    rows,
+    summary: {
+      totalRows: rows.length,
+      totalPremium: Math.round(rows.reduce((s: number, r: any) => s + r.monthlyPremium, 0) * 100) / 100,
+      totalIncome: Math.round(rows.reduce((s: number, r: any) => s + r.income, 0) * 100) / 100,
+      totalLives: rows.reduce((s: number, r: any) => s + r.lives, 0),
+      totalClients: clientsSet.size,
+      totalCarriers: carriersSet.size,
+      periods: sortedPeriods.length,
+    },
+    filters: {
+      carriers: Array.from(carriersSet).sort(),
+      clients: Array.from(clientsSet).sort(),
+      coverageTypes: Array.from(coverageTypesSet).sort(),
+      periods: sortedPeriods,
+      fiscalYears,
+      policyNumbers: Array.from(policyNumbersSet).sort(),
+    },
+    carrierSettings: carrierSettings.map(cs => ({
+      id: cs.id, carrierName: cs.carrierName,
+      incomeMethod: cs.incomeMethod, rate: cs.rate,
+    })),
+  };
+}
+
 // ─── Public API ──────────────────────────────────────────────────────────────
 
 export async function rebuildAllCaches(): Promise<{ timings: Record<string, number> }> {
@@ -611,7 +848,7 @@ export async function rebuildAllCaches(): Promise<{ timings: Record<string, numb
 
   const timings: Record<string, number> = { processSnapshots: processTime };
 
-  // Build all reports in parallel (CPU-bound, no I/O)
+  // Build lightweight reports from pre-aggregated data (CPU-bound, no I/O)
   const builders: [string, () => any][] = [
     ["production", () => buildProductionReport(snapshots)],
     ["dashboard", () => buildDashboard(snapshots)],
@@ -625,6 +862,12 @@ export async function rebuildAllCaches(): Promise<{ timings: Record<string, numb
     timings[key] = Date.now() - start;
     return { key, data };
   });
+
+  // Build production dashboard separately (requires I/O for employee metadata)
+  const pdStart = Date.now();
+  const pdData = await buildProductionDashboard();
+  timings["production-dashboard"] = Date.now() - pdStart;
+  built.push({ key: "production-dashboard", data: pdData });
 
   // Store all reports in parallel (I/O-bound)
   await Promise.all(

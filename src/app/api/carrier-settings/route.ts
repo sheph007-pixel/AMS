@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
+import { rebuildAllCaches } from "@/lib/report-cache";
 
 export async function GET() {
   try {
@@ -31,6 +32,9 @@ export async function POST(req: NextRequest) {
       create: { carrierName, incomeMethod, rate: Number(rate) || 0 },
     });
 
+    // Rebuild cache in background so dashboard reflects new settings
+    rebuildAllCaches().catch(e => console.error("Cache rebuild after carrier setting change:", e));
+
     return NextResponse.json(setting);
   } catch (error) {
     console.error("Carrier settings POST error:", error);
@@ -46,6 +50,9 @@ export async function DELETE(req: NextRequest) {
       return NextResponse.json({ error: "id is required" }, { status: 400 });
     }
     await prisma.carrierSetting.delete({ where: { id } });
+
+    rebuildAllCaches().catch(e => console.error("Cache rebuild after carrier setting delete:", e));
+
     return NextResponse.json({ success: true });
   } catch (error) {
     console.error("Carrier settings DELETE error:", error);
