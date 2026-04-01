@@ -15,6 +15,17 @@ async function main() {
   });
 
   console.log("Seed complete: default exclusion rules applied.");
+
+  // Warm report cache on startup
+  try {
+    const { rebuildAllCaches } = await import("../src/lib/report-cache");
+    console.log("Building report caches...");
+    const t0 = Date.now();
+    const result = await rebuildAllCaches();
+    console.log(`Report caches built in ${Date.now() - t0}ms`, result.timings);
+  } catch (e) {
+    console.log("Cache warmup skipped (may run on first request):", (e as Error).message);
+  }
 }
 
 main()

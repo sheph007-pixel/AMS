@@ -177,3 +177,15 @@ model FinancialSummary {
 
   @@unique([entityId, accountId, year, month, statementType])
 }
+
+// ─── Report Cache ───────────────────────────────────────────────────────────
+
+/// Pre-computed report data. Rebuilt after each import.
+/// Eliminates the need to re-process all employee metadata on every page load.
+model ReportCache {
+  id        String   @id @default(cuid())
+  key       String   @unique /// "production", "dashboard", "income", "benefits"
+  data      String   /// JSON blob of the full API response
+  builtAt   DateTime @default(now())
+  buildTimeMs Int    @default(0) /// How long it took to build (for monitoring)
+}

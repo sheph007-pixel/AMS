@@ -28,6 +28,11 @@ export async function POST(request: NextRequest) {
     const xmlContent = await file.text();
     const result = await importAnnualXml(xmlContent, year, month);
 
+    // Rebuild report caches in the background (don't block response)
+    import("@/lib/report-cache").then(({ rebuildAllCaches }) => {
+      rebuildAllCaches().catch((e) => console.error("Cache rebuild after import failed:", e));
+    });
+
     return NextResponse.json({ success: true, ...result });
   } catch (error) {
     console.error("Import error:", error);
