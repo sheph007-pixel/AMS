@@ -374,13 +374,15 @@ export default function ProductionDashboardPage() {
   const loadData = useCallback(() => {
     setLoading(true);
     setError(null);
-    fetch("/api/reports/production-dashboard")
-      .then(res => { if (!res.ok) throw new Error(`Server error (${res.status})`); return res.json(); })
-      .then(data => {
+    Promise.all([
+      fetch("/api/reports/production-dashboard").then(res => { if (!res.ok) throw new Error(`Server error (${res.status})`); return res.json(); }),
+      fetch("/api/carrier-settings").then(res => res.ok ? res.json() : []),
+    ])
+      .then(([data, cs]) => {
         setAllRows(data.rows || []);
         setSummary(data.summary || null);
         setFilterOptions(data.filters || null);
-        setCarrierSettings(data.carrierSettings || []);
+        setCarrierSettings(cs || []);
       })
       .catch(err => setError(err.message))
       .finally(() => setLoading(false));
@@ -462,17 +464,14 @@ export default function ProductionDashboardPage() {
     { key: "month", label: "Month", align: "text-left" },
     { key: "clientName", label: "Client Name", align: "text-left" },
     { key: "carrier", label: "Carrier", align: "text-left" },
-    { key: "policyNumber", label: "Policy Number", align: "text-left" },
+    { key: "policyNumber", label: "Policy #", align: "text-left" },
     { key: "planName", label: "Plan Name", align: "text-left" },
     { key: "grouping", label: "Grouping", align: "text-left" },
     { key: "rate", label: "Rate", align: "text-right" },
     { key: "lives", label: "Lives", align: "text-right" },
-    { key: "benefitAmount", label: "Benefit Amount", align: "text-right" },
-    { key: "monthlyPremium", label: "Monthly Premium", align: "text-right" },
-    { key: "incomeMethod", label: "Income Method", align: "text-left" },
-    { key: "feeRate", label: "Fee/Comm Rate", align: "text-right" },
+    { key: "benefitAmount", label: "Benefit Amt", align: "text-right" },
+    { key: "monthlyPremium", label: "Premium", align: "text-right" },
     { key: "income", label: "Income", align: "text-right" },
-    { key: "coverageType", label: "Coverage Type", align: "text-left" },
   ];
 
   return (
@@ -578,7 +577,7 @@ export default function ProductionDashboardPage() {
                   <tr>
                     {columns.map(col => (
                       <th key={col.key}
-                        className={`${col.align} px-4 py-3 font-semibold text-bob-text-soft cursor-pointer hover:text-bob-text select-none transition-colors text-xs`}
+                        className={`${col.align} px-3 py-2.5 font-semibold text-bob-text-soft cursor-pointer hover:text-bob-text select-none transition-colors text-xs`}
                         onClick={() => handleSort(col.key)}>
                         {col.label} <SortIcon column={col.key} />
                       </th>
@@ -589,31 +588,21 @@ export default function ProductionDashboardPage() {
                   {paged.map((row, i) => (
                     <tr key={`${row.month}-${row.clientCode}-${row.policyNumber}-${row.planName}-${row.grouping}-${i}`}
                       className="hover:bg-bob-bg/50 transition-colors duration-100">
-                      <td className="px-4 py-2.5 text-bob-text font-medium text-xs">{fmtMonth(row.month)}</td>
-                      <td className="px-4 py-2.5 text-bob-text font-medium max-w-[260px] truncate" title={row.clientName}>{row.clientName}</td>
-                      <td className="px-4 py-2.5 text-bob-text text-xs">{row.carrier}</td>
-                      <td className="px-4 py-2.5 text-bob-text-soft font-mono text-xs">{row.policyNumber || "\u2014"}</td>
-                      <td className="px-4 py-2.5 text-bob-text text-xs max-w-[260px] truncate" title={row.planName}>{row.planName || "\u2014"}</td>
-                      <td className="px-4 py-2.5 text-bob-text-soft text-xs">{row.grouping}</td>
-                      <td className="px-4 py-2.5 text-right tabular-nums text-xs">{row.rate ? fmtRate(row.rate) : "\u2014"}</td>
-                      <td className="px-4 py-2.5 text-right font-semibold tabular-nums">{row.lives}</td>
-                      <td className="px-4 py-2.5 text-right tabular-nums text-xs text-bob-text-soft">
+                      <td className="px-3 py-2 text-bob-text font-medium text-xs">{fmtMonth(row.month)}</td>
+                      <td className="px-3 py-2 text-bob-text font-medium text-xs max-w-[220px] truncate" title={row.clientName}>{row.clientName}</td>
+                      <td className="px-3 py-2 text-bob-text text-xs">{row.carrier}</td>
+                      <td className="px-3 py-2 text-bob-text-soft font-mono text-xs">{row.policyNumber || "\u2014"}</td>
+                      <td className="px-3 py-2 text-bob-text text-xs max-w-[220px] truncate" title={row.planName}>{row.planName || "\u2014"}</td>
+                      <td className="px-3 py-2 text-bob-text-soft text-xs">{row.grouping}</td>
+                      <td className="px-3 py-2 text-right tabular-nums text-xs">{row.rate ? fmtRate(row.rate) : "\u2014"}</td>
+                      <td className="px-3 py-2 text-right font-semibold tabular-nums text-xs">{row.lives}</td>
+                      <td className="px-3 py-2 text-right tabular-nums text-xs text-bob-text-soft">
                         {row.benefitAmount > 0 ? fmtCurrency(row.benefitAmount) : "\u2014"}
                       </td>
-                      <td className="px-4 py-2.5 text-right font-semibold tabular-nums">{fmtCurrency(row.monthlyPremium)}</td>
-                      <td className="px-4 py-2.5">
-                        {row.incomeMethod !== "NONE" ? (
-                          <span className={`inline-flex items-center px-2 py-0.5 text-[10px] font-semibold rounded-full ${
-                            row.incomeMethod === "PEPM" ? "bg-blue-50 text-blue-700" :
-                            "bg-purple-50 text-purple-700"
-                          }`}>{row.incomeMethod}</span>
-                        ) : <span className="text-gray-300 text-xs">{"\u2014"}</span>}
-                      </td>
-                      <td className="px-4 py-2.5 text-right text-bob-text-soft tabular-nums text-xs">{row.feeRateDisplay || "\u2014"}</td>
-                      <td className="px-4 py-2.5 text-right font-semibold tabular-nums text-bob-green">
+                      <td className="px-3 py-2 text-right font-semibold tabular-nums text-xs">{fmtCurrency(row.monthlyPremium)}</td>
+                      <td className="px-3 py-2 text-right font-semibold tabular-nums text-xs text-bob-green">
                         {row.income > 0 ? fmtCurrency(row.income) : <span className="text-gray-300">{"\u2014"}</span>}
                       </td>
-                      <td className="px-4 py-2.5 text-bob-text-soft text-xs">{row.coverageType}</td>
                     </tr>
                   ))}
                   {paged.length === 0 && (
