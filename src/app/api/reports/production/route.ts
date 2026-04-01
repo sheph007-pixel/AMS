@@ -42,6 +42,7 @@ interface ProductionRow {
   agencyCode: string;
   billType: string;
   producer: string;
+  broker: string;
   department: string;
 }
 
@@ -65,9 +66,17 @@ export async function GET() {
     const periodsSet = new Set<string>();
     let totalPremium = 0;
     let totalEstIncome = 0;
+    let snapshotsProcessed = 0;
+    let snapshotsSkipped = 0;
+    let employeesProcessed = 0;
+    let enrollmentsProcessed = 0;
 
     for (const snapshot of snapshots) {
-      if (isExcluded({ groupName: snapshot.client.groupName }, exclusionRules)) continue;
+      if (isExcluded({ groupName: snapshot.client.groupName }, exclusionRules)) {
+        snapshotsSkipped++;
+        continue;
+      }
+      snapshotsProcessed++;
 
       const { year, month } = snapshot;
       const periodKey = `${year}-${String(month).padStart(2, "0")}`;
@@ -121,6 +130,7 @@ export async function GET() {
       for (const emp of snapshot.employees) {
         if ((emp.status || "Active").toLowerCase() !== "active") continue;
         if (!emp.metadata) continue;
+        employeesProcessed++;
 
         let meta: any;
         try { meta = JSON.parse(emp.metadata); } catch { continue; }
@@ -129,6 +139,7 @@ export async function GET() {
         const empKey = emp.employeeId;
 
         for (const enrollment of enrollments) {
+          enrollmentsProcessed++;
           // Enrollment qualification (same logic as income report)
           const enrollmentType = enrollment.EnrollmentType || enrollment.enrollmentType || enrollment.Type;
           let isQualifying = false;
@@ -220,10 +231,33 @@ export async function GET() {
           agencyCode: "KENNION",
           billType: "Direct",
           producer: "Kennion Benefits",
+          broker: "Kennion Benefits / NIA",
           department: "",
         });
       }
     }
+
+    // Detect period gaps
+    const sortedPeriods = Array.from(periodsSet).sort();
+    const periodGaps: string[] = [];
+    for (let i = 1; i < sortedPeriods.length; i++) {
+      const [prevY, prevM] = sortedPeriods[i - 1].split("-").map(Number);
+      const [currY, currM] = sortedPeriods[i].split("-").map(Number);
+      const prevTotal = prevY * 12 + prevM;
+      const currTotal = currY * 12 + currM;
+      if (currTotal - prevTotal > 1) {
+        // There's a gap — list missing months
+        for (let t = prevTotal + 1; t < currTotal; t++) {
+          const gY = Math.floor((t - 1) / 12);
+          const gM = ((t - 1) % 12) + 1;
+          periodGaps.push(`${gY}-${String(gM).padStart(2, "0")}`);
+        }
+      }
+    }
+
+    // Cross-check: sum rows premium vs totalPremium
+    const rowPremiumSum = Math.round(rows.reduce((s, r) => s + r.monthlyPremium, 0) * 100) / 100;
+    const rowFeeSum = Math.round(rows.reduce((s, r) => s + r.estMonthlyFee, 0) * 100) / 100;
 
     return NextResponse.json({
       rows,
@@ -234,7 +268,31 @@ export async function GET() {
         totalPremium: Math.round(totalPremium * 100) / 100,
         totalEstIncome: Math.round(totalEstIncome * 100) / 100,
       },
-      periods: Array.from(periodsSet).sort(),
+      audit: {
+        generatedAt: new Date().toISOString(),
+        snapshotsQueried: snapshots.length,
+        snapshotsProcessed,
+        snapshotsSkipped,
+        employeesProcessed,
+        enrollmentsProcessed,
+        premiumCrossCheck: {
+          summaryTotal: Math.round(totalPremium * 100) / 100,
+          rowDetailTotal: rowPremiumSum,
+          match: Math.round(totalPremium * 100) / 100 === rowPremiumSum,
+        },
+        feeCrossCheck: {
+          summaryTotal: Math.round(totalEstIncome * 100) / 100,
+          rowDetailTotal: rowFeeSum,
+          match: Math.round(totalEstIncome * 100) / 100 === rowFeeSum,
+        },
+        periodCoverage: {
+          first: sortedPeriods[0] || null,
+          last: sortedPeriods[sortedPeriods.length - 1] || null,
+          totalMonths: sortedPeriods.length,
+          gaps: periodGaps,
+        },
+      },
+      periods: sortedPeriods,
       methodology: {
         dataSource: "Employee Navigator XML enrollment data",
         pepmCarriers: PEPM_CARRIERS,

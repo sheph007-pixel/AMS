@@ -30,7 +30,20 @@ interface ProductionRow {
   agencyCode: string;
   billType: string;
   producer: string;
+  broker: string;
   department: string;
+}
+
+interface AuditInfo {
+  generatedAt: string;
+  snapshotsQueried: number;
+  snapshotsProcessed: number;
+  snapshotsSkipped: number;
+  employeesProcessed: number;
+  enrollmentsProcessed: number;
+  premiumCrossCheck: { summaryTotal: number; rowDetailTotal: number; match: boolean };
+  feeCrossCheck: { summaryTotal: number; rowDetailTotal: number; match: boolean };
+  periodCoverage: { first: string | null; last: string | null; totalMonths: number; gaps: string[] };
 }
 
 interface Summary {
@@ -79,7 +92,7 @@ const CSV_HEADERS = [
   "Insurance Carrier", "Line of Business", "Plan Name", "Coverage Type",
   "Eligible Employees", "Enrolled Employees", "Monthly Premium",
   "Fee Type", "Rate", "Est. Monthly Commission/Fee", "Est. Annual Commission/Fee",
-  "Agency Code", "Bill Type", "Producer", "Department",
+  "Agency Code", "Bill Type", "Producer", "Broker", "Department",
 ];
 
 function toCSV(rows: ProductionRow[]): string {
@@ -94,61 +107,196 @@ function toCSV(rows: ProductionRow[]): string {
       r.eligible, r.enrolled, r.monthlyPremium.toFixed(2),
       `"${r.feeType}"`, `"${r.rate}"`,
       r.estMonthlyFee.toFixed(2), r.estAnnualFee.toFixed(2),
-      `"${r.agencyCode}"`, `"${r.billType}"`, `"${r.producer}"`, `"${r.department}"`,
+      `"${r.agencyCode}"`, `"${r.billType}"`, `"${r.producer}"`, `"${r.broker}"`, `"${r.department}"`,
     ].join(",")
   );
   return [header, ...lines].join("\n");
 }
 
-function toExcelXML(rows: ProductionRow[]): string {
+function toExcelXML(rows: ProductionRow[], summary: Summary | null, methodology: Methodology | null, audit: AuditInfo | null): string {
   const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const cell = (v: string, style?: string) => `<Cell${style ? ` ss:StyleID="${style}"` : ""}><Data ss:Type="String">${esc(v)}</Data></Cell>`;
+  const numCell = (v: number, style?: string) => `<Cell${style ? ` ss:StyleID="${style}"` : ""}><Data ss:Type="Number">${v}</Data></Cell>`;
+  const blankRow = () => "<Row></Row>";
 
   let xml = `<?xml version="1.0"?><?mso-application progid="Excel.Sheet"?>
 <Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet"
  xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet">
 <Styles>
  <Style ss:ID="Bold"><Font ss:Bold="1"/></Style>
+ <Style ss:ID="Title"><Font ss:Bold="1" ss:Size="14"/></Style>
+ <Style ss:ID="SectionHead"><Font ss:Bold="1" ss:Size="11"/></Style>
  <Style ss:ID="Currency"><NumberFormat ss:Format="$#,##0.00"/></Style>
-</Styles>
-<Worksheet ss:Name="Production Report">
-<Table>`;
+ <Style ss:ID="CurrencyBold"><Font ss:Bold="1"/><NumberFormat ss:Format="$#,##0.00"/></Style>
+ <Style ss:ID="Pct"><NumberFormat ss:Format="0.00%"/></Style>
+</Styles>`;
 
-  // Header row
+  // ─── Tab 1: Cover Sheet ─────────────────────────────────────────────
+  xml += `<Worksheet ss:Name="Cover Sheet"><Table>`;
+  xml += `<Row>${cell("KENNION AMS — PRODUCTION REPORT", "Title")}</Row>`;
+  xml += blankRow();
+  xml += `<Row>${cell("Report Generated:", "Bold")}${cell(new Date().toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric", hour: "2-digit", minute: "2-digit" }))}</Row>`;
+  xml += `<Row>${cell("Prepared By:", "Bold")}${cell("Kennion Agency Management System")}</Row>`;
+  xml += `<Row>${cell("Agency:", "Bold")}${cell("Kennion Benefits / NIA")}</Row>`;
+  if (summary) {
+    xml += `<Row>${cell("Period Covered:", "Bold")}${cell(`${summary.totalPeriods} months of enrollment data`)}</Row>`;
+    xml += `<Row>${cell("Total Clients:", "Bold")}${cell(String(summary.totalClients))}</Row>`;
+    xml += `<Row>${cell("Total Detail Rows:", "Bold")}${cell(summary.totalRows.toLocaleString())}</Row>`;
+  }
+  xml += blankRow();
+  xml += `<Row>${cell("DATA SOURCE & METHODOLOGY", "SectionHead")}</Row>`;
+  xml += blankRow();
+  xml += `<Row>${cell("Data Source:")}</Row>`;
+  xml += `<Row>${cell("Employee Navigator — the enrollment and billing platform used to administer all client benefit plans.")}</Row>`;
+  xml += `<Row>${cell("Premium figures represent monthly billing amounts from Employee Navigator enrollment records.")}</Row>`;
+  xml += blankRow();
+  xml += `<Row>${cell("Fee Model:", "Bold")}</Row>`;
+  if (methodology) {
+    xml += `<Row>${cell(`  PEPM Carriers (${methodology.pepmCarriers.join(", ")}): Enrolled employees x $${methodology.pepmRate}/month`)}</Row>`;
+    xml += `<Row>${cell(`  Commission Carriers (${methodology.commissionCarriers.join(", ")}): Monthly premium x ${methodology.commissionRate * 100}%`)}</Row>`;
+    xml += `<Row>${cell("  Carriers not in either category: No estimated fee (actual fees tracked in financial statements)")}</Row>`;
+  }
+  xml += blankRow();
+  xml += `<Row>${cell("RECONCILIATION NOTE", "SectionHead")}</Row>`;
+  xml += blankRow();
+  xml += `<Row>${cell("Actual collected revenue is recorded in Kennion/NIA financial statements and may differ from estimated")}</Row>`;
+  xml += `<Row>${cell("fees shown here due to timing, retroactive adjustments, mid-month enrollment changes, and carrier payment cycles.")}</Row>`;
+  xml += `<Row>${cell("This report reflects billing-level data from the enrollment system, not cash receipts.")}</Row>`;
+  // Audit info on cover sheet
+  if (audit) {
+    xml += blankRow();
+    xml += `<Row>${cell("DATA INTEGRITY AUDIT", "SectionHead")}</Row>`;
+    xml += blankRow();
+    xml += `<Row>${cell("Snapshots Queried:", "Bold")}${cell(String(audit.snapshotsQueried))}</Row>`;
+    xml += `<Row>${cell("Snapshots Processed:", "Bold")}${cell(String(audit.snapshotsProcessed))}</Row>`;
+    xml += `<Row>${cell("Employees Processed:", "Bold")}${cell(audit.employeesProcessed.toLocaleString())}</Row>`;
+    xml += `<Row>${cell("Enrollments Processed:", "Bold")}${cell(audit.enrollmentsProcessed.toLocaleString())}</Row>`;
+    xml += `<Row>${cell("Premium Cross-Check:", "Bold")}${cell(audit.premiumCrossCheck.match ? "PASS — summary matches detail rows" : "MISMATCH — review required")}</Row>`;
+    xml += `<Row>${cell("Fee Cross-Check:", "Bold")}${cell(audit.feeCrossCheck.match ? "PASS — summary matches detail rows" : "MISMATCH — review required")}</Row>`;
+    xml += `<Row>${cell("Period Gaps:", "Bold")}${cell(audit.periodCoverage.gaps.length === 0 ? "None — continuous coverage" : audit.periodCoverage.gaps.join(", "))}</Row>`;
+  }
+  xml += blankRow();
+  xml += `<Row>${cell("DATA DICTIONARY", "SectionHead")}</Row>`;
+  xml += blankRow();
+  xml += `<Row>${cell("Column", "Bold")}${cell("Description", "Bold")}${cell("Source", "Bold")}</Row>`;
+  const dictEntries: [string, string, string][] = [
+    ["Year", "Fiscal year of the billing period", "XML filename date"],
+    ["Month", "Month of the billing period", "XML filename date"],
+    ["Transaction Date", "First day of billing month (YYYY-MM-01)", "Derived"],
+    ["Client Name", "Legal name of the group/company", "EN XML — EntityName"],
+    ["Client Code", "Unique group identifier", "EN XML — CompanyIdentifier"],
+    ["SIC Code", "Standard Industrial Classification", "EN XML — SICCode"],
+    ["State", "Situs state of the group", "EN XML — SitusState"],
+    ["Insurance Carrier", "Carrier/vendor name", "EN XML — Carrier on plan"],
+    ["Line of Business", "Plan type (Medical, Dental, etc.)", "EN XML — CarrierPlanTypeCode"],
+    ["Plan Name", "Specific plan identifier", "EN XML — PlanName"],
+    ["Coverage Type", "Group or Individual", "All records are Group"],
+    ["Eligible Employees", "Employees with enrollment record", "EN enrollment count"],
+    ["Enrolled Employees", "Actively enrolled (Current status)", "EN enrollment count"],
+    ["Monthly Premium", "Total monthly premium billed", "Sum of PlanCost"],
+    ["Fee Type", "PEPM or Commission", "Carrier classification"],
+    ["Rate", "Fee rate applied", "Standard fee schedule"],
+    ["Est. Monthly Commission/Fee", "Estimated monthly fee income", "Calculated"],
+    ["Est. Annual Commission/Fee", "Monthly fee x 12", "Calculated"],
+    ["Agency Code", "Agency identifier", "KENNION"],
+    ["Bill Type", "Billing method", "Direct"],
+    ["Producer", "Producing agent", "Kennion Benefits"],
+    ["Broker", "Broker of record", "Kennion Benefits / NIA"],
+    ["Department", "Internal department", "Not tracked in EN"],
+  ];
+  for (const [col, desc, src] of dictEntries) {
+    xml += `<Row>${cell(col)}${cell(desc)}${cell(src)}</Row>`;
+  }
+  xml += `</Table></Worksheet>`;
+
+  // ─── Tab 2: Production Data ─────────────────────────────────────────
+  xml += `<Worksheet ss:Name="Production Data"><Table>`;
   xml += "<Row>";
   CSV_HEADERS.forEach(h => { xml += `<Cell ss:StyleID="Bold"><Data ss:Type="String">${esc(h)}</Data></Cell>`; });
   xml += "</Row>";
 
-  // Data rows
   for (const r of rows) {
     xml += "<Row>";
-    xml += `<Cell><Data ss:Type="Number">${r.year}</Data></Cell>`;
-    xml += `<Cell><Data ss:Type="String">${monthName(r.month)}</Data></Cell>`;
-    xml += `<Cell><Data ss:Type="String">${r.transactionDate}</Data></Cell>`;
-    xml += `<Cell><Data ss:Type="String">${esc(r.clientName)}</Data></Cell>`;
-    xml += `<Cell><Data ss:Type="String">${esc(r.clientCode)}</Data></Cell>`;
-    xml += `<Cell><Data ss:Type="String">${esc(r.sicCode)}</Data></Cell>`;
-    xml += `<Cell><Data ss:Type="String">${esc(r.state)}</Data></Cell>`;
-    xml += `<Cell><Data ss:Type="String">${esc(r.carrier)}</Data></Cell>`;
-    xml += `<Cell><Data ss:Type="String">${esc(r.lineOfBusiness)}</Data></Cell>`;
-    xml += `<Cell><Data ss:Type="String">${esc(r.planName)}</Data></Cell>`;
-    xml += `<Cell><Data ss:Type="String">${r.coverageType}</Data></Cell>`;
-    xml += `<Cell><Data ss:Type="Number">${r.eligible}</Data></Cell>`;
-    xml += `<Cell><Data ss:Type="Number">${r.enrolled}</Data></Cell>`;
-    xml += `<Cell ss:StyleID="Currency"><Data ss:Type="Number">${r.monthlyPremium}</Data></Cell>`;
-    xml += `<Cell><Data ss:Type="String">${r.feeType}</Data></Cell>`;
-    xml += `<Cell><Data ss:Type="String">${r.rate}</Data></Cell>`;
-    xml += `<Cell ss:StyleID="Currency"><Data ss:Type="Number">${r.estMonthlyFee}</Data></Cell>`;
-    xml += `<Cell ss:StyleID="Currency"><Data ss:Type="Number">${r.estAnnualFee}</Data></Cell>`;
-    xml += `<Cell><Data ss:Type="String">${r.agencyCode}</Data></Cell>`;
-    xml += `<Cell><Data ss:Type="String">${r.billType}</Data></Cell>`;
-    xml += `<Cell><Data ss:Type="String">${r.producer}</Data></Cell>`;
-    xml += `<Cell><Data ss:Type="String">${r.department}</Data></Cell>`;
+    xml += numCell(r.year);
+    xml += cell(monthName(r.month));
+    xml += cell(r.transactionDate);
+    xml += cell(r.clientName);
+    xml += cell(r.clientCode);
+    xml += cell(r.sicCode);
+    xml += cell(r.state);
+    xml += cell(r.carrier);
+    xml += cell(r.lineOfBusiness);
+    xml += cell(r.planName);
+    xml += cell(r.coverageType);
+    xml += numCell(r.eligible);
+    xml += numCell(r.enrolled);
+    xml += numCell(r.monthlyPremium, "Currency");
+    xml += cell(r.feeType);
+    xml += cell(r.rate);
+    xml += numCell(r.estMonthlyFee, "Currency");
+    xml += numCell(r.estAnnualFee, "Currency");
+    xml += cell(r.agencyCode);
+    xml += cell(r.billType);
+    xml += cell(r.producer);
+    xml += cell(r.broker);
+    xml += cell(r.department);
     xml += "</Row>";
   }
+  xml += `</Table></Worksheet>`;
 
-  xml += "</Table></Worksheet></Workbook>";
+  // ─── Tab 3: Summary by Year ─────────────────────────────────────────
+  const yearMap = new Map<number, { clients: Set<string>; enrolled: number; premium: number; estFee: number; rows: number }>();
+  for (const r of rows) {
+    let y = yearMap.get(r.year);
+    if (!y) { y = { clients: new Set(), enrolled: 0, premium: 0, estFee: 0, rows: 0 }; yearMap.set(r.year, y); }
+    y.clients.add(r.clientCode);
+    y.enrolled += r.enrolled;
+    y.premium += r.monthlyPremium;
+    y.estFee += r.estMonthlyFee;
+    y.rows++;
+  }
+
+  xml += `<Worksheet ss:Name="Summary by Year"><Table>`;
+  xml += `<Row>${cell("Fiscal Year", "Bold")}${cell("Clients", "Bold")}${cell("Detail Rows", "Bold")}${cell("Total Enrolled", "Bold")}${cell("Total Premium", "Bold")}${cell("Est. Fee Income", "Bold")}${cell("Effective Margin", "Bold")}</Row>`;
+  let grandPremium = 0, grandFee = 0;
+  for (const [year, data] of Array.from(yearMap.entries()).sort((a, b) => a[0] - b[0])) {
+    const margin = data.premium > 0 ? data.estFee / data.premium : 0;
+    xml += `<Row>${numCell(year)}${numCell(data.clients.size)}${numCell(data.rows)}${numCell(data.enrolled)}${numCell(Math.round(data.premium * 100) / 100, "Currency")}${numCell(Math.round(data.estFee * 100) / 100, "Currency")}${numCell(Math.round(margin * 10000) / 10000, "Pct")}</Row>`;
+    grandPremium += data.premium;
+    grandFee += data.estFee;
+  }
+  xml += `<Row>${cell("TOTAL", "Bold")}${cell("")}${numCell(rows.length)}${cell("")}${numCell(Math.round(grandPremium * 100) / 100, "CurrencyBold")}${numCell(Math.round(grandFee * 100) / 100, "CurrencyBold")}${numCell(grandPremium > 0 ? Math.round((grandFee / grandPremium) * 10000) / 10000 : 0, "Pct")}</Row>`;
+  xml += `</Table></Worksheet>`;
+
+  // ─── Tab 4: Summary by Carrier ──────────────────────────────────────
+  const carrierMap = new Map<string, { clients: Set<string>; enrolled: number; premium: number; estFee: number; rows: number }>();
+  for (const r of rows) {
+    let c = carrierMap.get(r.carrier);
+    if (!c) { c = { clients: new Set(), enrolled: 0, premium: 0, estFee: 0, rows: 0 }; carrierMap.set(r.carrier, c); }
+    c.clients.add(r.clientCode);
+    c.enrolled += r.enrolled;
+    c.premium += r.monthlyPremium;
+    c.estFee += r.estMonthlyFee;
+    c.rows++;
+  }
+
+  xml += `<Worksheet ss:Name="Summary by Carrier"><Table>`;
+  xml += `<Row>${cell("Insurance Carrier", "Bold")}${cell("Clients", "Bold")}${cell("Detail Rows", "Bold")}${cell("Total Enrolled", "Bold")}${cell("Total Premium", "Bold")}${cell("Est. Fee Income", "Bold")}${cell("Fee Type", "Bold")}</Row>`;
+  for (const [carrier, data] of Array.from(carrierMap.entries()).sort((a, b) => b[1].premium - a[1].premium)) {
+    const isPEPM = PEPM_CARRIERS.some(c => carrier.toLowerCase().includes(c.toLowerCase()));
+    const isComm = COMMISSION_CARRIERS.some(c => carrier.toLowerCase().includes(c.toLowerCase()));
+    const feeType = isPEPM ? "PEPM" : isComm ? "Commission" : "N/A";
+    xml += `<Row>${cell(carrier)}${numCell(data.clients.size)}${numCell(data.rows)}${numCell(data.enrolled)}${numCell(Math.round(data.premium * 100) / 100, "Currency")}${numCell(Math.round(data.estFee * 100) / 100, "Currency")}${cell(feeType)}</Row>`;
+  }
+  xml += `<Row>${cell("TOTAL", "Bold")}${cell("")}${numCell(rows.length)}${cell("")}${numCell(Math.round(grandPremium * 100) / 100, "CurrencyBold")}${numCell(Math.round(grandFee * 100) / 100, "CurrencyBold")}${cell("")}</Row>`;
+  xml += `</Table></Worksheet>`;
+
+  xml += "</Workbook>";
   return xml;
 }
+
+const PEPM_CARRIERS = ["EBPA", "HealthEZ"];
+const COMMISSION_CARRIERS = ["Guardian", "VSP"];
 
 // ─── Collapsible Section ──────────────────────────────────────────────────────
 
@@ -175,6 +323,7 @@ export default function ProductionReportPage() {
   const [summary, setSummary] = useState<Summary | null>(null);
   const [methodology, setMethodology] = useState<Methodology | null>(null);
   const [periods, setPeriods] = useState<string[]>([]);
+  const [audit, setAudit] = useState<AuditInfo | null>(null);
   const [search, setSearch] = useState("");
   const [yearFilter, setYearFilter] = useState<string>("all");
   const [loading, setLoading] = useState(true);
@@ -191,6 +340,7 @@ export default function ProductionReportPage() {
         setSummary(data.summary || null);
         setMethodology(data.methodology || null);
         setPeriods(data.periods || []);
+        setAudit(data.audit || null);
       })
       .finally(() => setLoading(false));
   }, []);
@@ -254,7 +404,7 @@ export default function ProductionReportPage() {
   }
 
   function handleExcel() {
-    downloadFile(toExcelXML(sorted), "kennion-ams-production-report.xls", "application/vnd.ms-excel");
+    downloadFile(toExcelXML(sorted, summary, methodology, audit), "kennion-ams-production-report.xls", "application/vnd.ms-excel");
     setExportOpen(false);
   }
 
@@ -452,6 +602,66 @@ export default function ProductionReportPage() {
         )}
       </div>
 
+      {/* Data Integrity Audit */}
+      {audit && (
+        <div className="bg-white rounded-2xl border border-bob-border overflow-hidden mb-6">
+          <div className="px-5 py-4 border-b border-bob-border flex items-center gap-3">
+            <div className="w-8 h-8 rounded-lg bg-green-100 flex items-center justify-center">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#10B981" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M9 12l2 2 4-4"/><circle cx="12" cy="12" r="10"/></svg>
+            </div>
+            <div>
+              <h2 className="text-sm font-semibold text-bob-text">Data Integrity Audit</h2>
+              <p className="text-xs text-bob-text-soft">Generated {new Date(audit.generatedAt).toLocaleString()}</p>
+            </div>
+          </div>
+          <div className="p-5">
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
+              <div>
+                <p className="text-xs font-medium text-bob-text-soft uppercase tracking-wide">Snapshots Queried</p>
+                <p className="text-lg font-bold text-bob-text">{audit.snapshotsQueried.toLocaleString()}</p>
+              </div>
+              <div>
+                <p className="text-xs font-medium text-bob-text-soft uppercase tracking-wide">Snapshots Processed</p>
+                <p className="text-lg font-bold text-bob-text">{audit.snapshotsProcessed.toLocaleString()}</p>
+              </div>
+              <div>
+                <p className="text-xs font-medium text-bob-text-soft uppercase tracking-wide">Employees Processed</p>
+                <p className="text-lg font-bold text-bob-text">{audit.employeesProcessed.toLocaleString()}</p>
+              </div>
+              <div>
+                <p className="text-xs font-medium text-bob-text-soft uppercase tracking-wide">Enrollments Processed</p>
+                <p className="text-lg font-bold text-bob-text">{audit.enrollmentsProcessed.toLocaleString()}</p>
+              </div>
+            </div>
+            <div className="space-y-2">
+              <div className="flex items-center gap-2 text-sm">
+                <span className={`w-5 h-5 rounded-full flex items-center justify-center text-white text-xs font-bold ${audit.premiumCrossCheck.match ? "bg-green-500" : "bg-red-500"}`}>
+                  {audit.premiumCrossCheck.match ? "✓" : "!"}
+                </span>
+                <span className="text-bob-text">Premium cross-check: Summary ({formatCurrency(audit.premiumCrossCheck.summaryTotal)}) vs detail rows ({formatCurrency(audit.premiumCrossCheck.rowDetailTotal)}) — <strong className={audit.premiumCrossCheck.match ? "text-green-600" : "text-red-600"}>{audit.premiumCrossCheck.match ? "MATCH" : "MISMATCH"}</strong></span>
+              </div>
+              <div className="flex items-center gap-2 text-sm">
+                <span className={`w-5 h-5 rounded-full flex items-center justify-center text-white text-xs font-bold ${audit.feeCrossCheck.match ? "bg-green-500" : "bg-red-500"}`}>
+                  {audit.feeCrossCheck.match ? "✓" : "!"}
+                </span>
+                <span className="text-bob-text">Fee income cross-check: Summary ({formatCurrency(audit.feeCrossCheck.summaryTotal)}) vs detail rows ({formatCurrency(audit.feeCrossCheck.rowDetailTotal)}) — <strong className={audit.feeCrossCheck.match ? "text-green-600" : "text-red-600"}>{audit.feeCrossCheck.match ? "MATCH" : "MISMATCH"}</strong></span>
+              </div>
+              <div className="flex items-center gap-2 text-sm">
+                <span className={`w-5 h-5 rounded-full flex items-center justify-center text-white text-xs font-bold ${audit.periodCoverage.gaps.length === 0 ? "bg-green-500" : "bg-yellow-500"}`}>
+                  {audit.periodCoverage.gaps.length === 0 ? "✓" : "!"}
+                </span>
+                <span className="text-bob-text">
+                  Period coverage: {audit.periodCoverage.first} through {audit.periodCoverage.last} ({audit.periodCoverage.totalMonths} months)
+                  {audit.periodCoverage.gaps.length === 0
+                    ? " — continuous, no gaps"
+                    : ` — ${audit.periodCoverage.gaps.length} gap(s): ${audit.periodCoverage.gaps.join(", ")}`}
+                </span>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Data Source Note */}
       <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 mb-6 flex gap-3">
         <Info className="w-5 h-5 text-blue-600 flex-shrink-0 mt-0.5" />
@@ -521,6 +731,7 @@ export default function ProductionReportPage() {
                   ["Agency Code", "Agency identifier", "KENNION (single agency)"],
                   ["Bill Type", "How the client is billed", "Direct (billed through Employee Navigator)"],
                   ["Producer", "Producing broker/agent", "Kennion Benefits (house account)"],
+                  ["Broker", "Broker of record for the group", "Kennion Benefits / NIA"],
                   ["Department", "Internal department code", "Not tracked in enrollment system"],
                 ].map(([col, desc, src], i) => (
                   <tr key={i} className="hover:bg-gray-50">
