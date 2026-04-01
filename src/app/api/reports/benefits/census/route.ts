@@ -38,7 +38,6 @@ export async function GET(request: NextRequest) {
       include: {
         client: true,
         benefitPlans: true,
-        employees: true,
       },
     });
 
@@ -80,65 +79,79 @@ export async function GET(request: NextRequest) {
         if (bp.planName) planNameLookup.set(bp.planName, info);
       }
 
-      // Process active employees
-      for (const emp of snapshot.employees) {
-        if ((emp.status || "Active").toLowerCase() !== "active") continue;
+      // Process active employees in batches to avoid loading all into memory
+      const BATCH_SIZE = 500;
+      let skip = 0;
+      let hasMore = true;
+      while (hasMore) {
+        const employeeBatch = await prisma.employeeSnapshot.findMany({
+          where: { clientSnapshotId: snapshot.id },
+          select: { employeeId: true, status: true, metadata: true, lastName: true, firstName: true },
+          take: BATCH_SIZE,
+          skip,
+        });
+        if (employeeBatch.length < BATCH_SIZE) hasMore = false;
+        skip += BATCH_SIZE;
 
-        if (!emp.metadata) continue;
-        let meta: any;
-        try { meta = JSON.parse(emp.metadata); } catch { continue; }
+        for (const emp of employeeBatch) {
+          if ((emp.status || "Active").toLowerCase() !== "active") continue;
 
-        const enrollments = findEnrollmentsFromMeta(meta);
-        const employeeName = `${emp.lastName}, ${emp.firstName}`.trim();
+          if (!emp.metadata) continue;
+          let meta: any;
+          try { meta = JSON.parse(emp.metadata); } catch { continue; }
 
-        for (const enrollment of enrollments) {
-          // EnrollmentType = "Current" filter
-          const enrollmentType = enrollment.EnrollmentType || enrollment.enrollmentType || enrollment.Type;
-          let isQualifying = false;
-          if (enrollmentType) {
-            isQualifying = String(enrollmentType).toLowerCase() === "current";
-          } else {
-            const declineReason = enrollment.DeclineReason || enrollment.declineReason;
-            const endDate = enrollment.CoverageEndDate || enrollment.EndDate || enrollment.EndedOn;
-            const isEnded = endDate && new Date(String(endDate)) <= new Date();
-            isQualifying = !declineReason && !isEnded;
+          const enrollments = findEnrollmentsFromMeta(meta);
+          const employeeName = `${emp.lastName}, ${emp.firstName}`.trim();
+
+          for (const enrollment of enrollments) {
+            // EnrollmentType = "Current" filter
+            const enrollmentType = enrollment.EnrollmentType || enrollment.enrollmentType || enrollment.Type;
+            let isQualifying = false;
+            if (enrollmentType) {
+              isQualifying = String(enrollmentType).toLowerCase() === "current";
+            } else {
+              const declineReason = enrollment.DeclineReason || enrollment.declineReason;
+              const endDate = enrollment.CoverageEndDate || enrollment.EndDate || enrollment.EndedOn;
+              const isEnded = endDate && new Date(String(endDate)) <= new Date();
+              isQualifying = !declineReason && !isEnded;
+            }
+            if (!isQualifying) continue;
+
+            // Resolve carrier
+            const enrollPlanId = String(enrollment.PlanIdentifier || enrollment.PlanId || enrollment.PlanID || "");
+            const enrollPlanName = String(enrollment.PlanName || enrollment.Plan || enrollment.Name || "");
+
+            let resolved: { carrier: string; planName: string; planType: string } | undefined;
+            if (enrollPlanId) {
+              resolved = planIdLookup.get(enrollPlanId);
+              if (!resolved && enrollPlanName) resolved = planNameLookup.get(enrollPlanName);
+            } else if (enrollPlanName) {
+              resolved = planNameLookup.get(enrollPlanName);
+            }
+
+            if (!resolved || resolved.carrier !== carrier) continue;
+
+            // PlanCost
+            const rawCost = String(enrollment.PlanCost || enrollment.MonthlyPlanCost || "");
+            const cost = rawCost ? parseFloat(rawCost) : 0;
+            const planCost = !isNaN(cost) ? Math.round(cost * 100) / 100 : 0;
+
+            // Coverage tier
+            const tier = String(
+              enrollment.CoverageLevel || enrollment.Tier || enrollment.CoverageTier ||
+              enrollment.coverageLevel || enrollment.tier || ""
+            );
+
+            rows.push({
+              groupName,
+              employeeName,
+              carrier: resolved.carrier,
+              planName: resolved.planName || enrollPlanName,
+              planType: resolved.planType,
+              coverageTier: tier,
+              planCost,
+            });
           }
-          if (!isQualifying) continue;
-
-          // Resolve carrier
-          const enrollPlanId = String(enrollment.PlanIdentifier || enrollment.PlanId || enrollment.PlanID || "");
-          const enrollPlanName = String(enrollment.PlanName || enrollment.Plan || enrollment.Name || "");
-
-          let resolved: { carrier: string; planName: string; planType: string } | undefined;
-          if (enrollPlanId) {
-            resolved = planIdLookup.get(enrollPlanId);
-            if (!resolved && enrollPlanName) resolved = planNameLookup.get(enrollPlanName);
-          } else if (enrollPlanName) {
-            resolved = planNameLookup.get(enrollPlanName);
-          }
-
-          if (!resolved || resolved.carrier !== carrier) continue;
-
-          // PlanCost
-          const rawCost = String(enrollment.PlanCost || enrollment.MonthlyPlanCost || "");
-          const cost = rawCost ? parseFloat(rawCost) : 0;
-          const planCost = !isNaN(cost) ? Math.round(cost * 100) / 100 : 0;
-
-          // Coverage tier
-          const tier = String(
-            enrollment.CoverageLevel || enrollment.Tier || enrollment.CoverageTier ||
-            enrollment.coverageLevel || enrollment.tier || ""
-          );
-
-          rows.push({
-            groupName,
-            employeeName,
-            carrier: resolved.carrier,
-            planName: resolved.planName || enrollPlanName,
-            planType: resolved.planType,
-            coverageTier: tier,
-            planCost,
-          });
         }
       }
     }

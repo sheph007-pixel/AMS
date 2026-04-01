@@ -42,7 +42,6 @@ export async function GET(request: NextRequest) {
       include: {
         client: true,
         benefitPlans: true,
-        employees: true,
       },
     });
 
@@ -96,97 +95,113 @@ export async function GET(request: NextRequest) {
         carrierCompanyIds.get(carrier)!.add(clientId);
       }
 
-      // Process employees
-      for (const emp of snapshot.employees) {
-        if ((emp.status || "Active").toLowerCase() !== "active") continue;
+      // Process employees in batches to avoid loading all into memory
+      const BATCH_SIZE = 500;
+      let empSkip = 0;
+      let empHasMore = true;
 
-        const empKey = `${clientId}::${emp.employeeId}`;
-        companyData.get(clientId)!.activeEmpKeys.add(empKey);
+      while (empHasMore) {
+        const empBatch = await prisma.employeeSnapshot.findMany({
+          where: { clientSnapshotId: snapshot.id },
+          select: { employeeId: true, firstName: true, lastName: true, status: true, metadata: true },
+          take: BATCH_SIZE,
+          skip: empSkip,
+        });
 
-        if (!emp.metadata) continue;
-        let meta: any;
-        try { meta = JSON.parse(emp.metadata); } catch { continue; }
+        if (empBatch.length < BATCH_SIZE) empHasMore = false;
+        empSkip += BATCH_SIZE;
 
-        const enrollments = findEnrollmentsFromMeta(meta);
-        const empName = `${emp.firstName} ${emp.lastName}`.trim();
-        const enrolledCarriers = new Set<string>();
-        const carrierPlanNames = new Map<string, string[]>();
+        for (const emp of empBatch) {
+          if ((emp.status || "Active").toLowerCase() !== "active") continue;
 
-        for (const enrollment of enrollments) {
-          // EnrollmentType filter
-          const enrollmentType = enrollment.EnrollmentType || enrollment.enrollmentType || enrollment.Type;
-          let isQualifying = false;
-          if (enrollmentType) {
-            isQualifying = String(enrollmentType).toLowerCase() === "current";
-          } else {
-            const declineReason = enrollment.DeclineReason || enrollment.declineReason;
-            const endDate = enrollment.CoverageEndDate || enrollment.EndDate || enrollment.EndedOn;
-            const isEnded = endDate && new Date(String(endDate)) <= new Date();
-            isQualifying = !declineReason && !isEnded;
+          const empKey = `${clientId}::${emp.employeeId}`;
+          companyData.get(clientId)!.activeEmpKeys.add(empKey);
+
+          if (!emp.metadata) continue;
+          let meta: any;
+          try { meta = JSON.parse(emp.metadata); } catch { continue; }
+
+          const enrollments = findEnrollmentsFromMeta(meta);
+          const empName = `${emp.firstName} ${emp.lastName}`.trim();
+          const enrolledCarriers = new Set<string>();
+          const carrierPlanNames = new Map<string, string[]>();
+
+          for (const enrollment of enrollments) {
+            // EnrollmentType filter
+            const enrollmentType = enrollment.EnrollmentType || enrollment.enrollmentType || enrollment.Type;
+            let isQualifying = false;
+            if (enrollmentType) {
+              isQualifying = String(enrollmentType).toLowerCase() === "current";
+            } else {
+              const declineReason = enrollment.DeclineReason || enrollment.declineReason;
+              const endDate = enrollment.CoverageEndDate || enrollment.EndDate || enrollment.EndedOn;
+              const isEnded = endDate && new Date(String(endDate)) <= new Date();
+              isQualifying = !declineReason && !isEnded;
+            }
+            if (!isQualifying) continue;
+
+            // Resolve carrier
+            const enrollPlanId = String(enrollment.PlanIdentifier || enrollment.PlanId || enrollment.PlanID || "");
+            const enrollPlanName = String(enrollment.PlanName || enrollment.Plan || enrollment.Name || "");
+
+            let resolved: { carrier: string; planName: string; planType: string } | undefined;
+            if (enrollPlanId) {
+              resolved = planIdLookup.get(enrollPlanId);
+              if (!resolved && enrollPlanName) resolved = planNameLookup.get(enrollPlanName);
+            } else if (enrollPlanName) {
+              resolved = planNameLookup.get(enrollPlanName);
+            }
+            if (!resolved) continue;
+
+            const carrier = resolved.carrier;
+
+            // PlanCost
+            const rawCost = String(enrollment.PlanCost || enrollment.MonthlyPlanCost || "");
+            const cost = rawCost ? parseFloat(rawCost) : 0;
+            const planCost = !isNaN(cost) ? Math.round(cost * 100) / 100 : 0;
+
+            const tier = String(enrollment.CoverageLevel || enrollment.Tier || enrollment.CoverageTier || "");
+
+            // Track enrolled
+            if (!enrolledCarriers.has(carrier)) {
+              enrolledCarriers.add(carrier);
+              if (!carrierPlanNames.has(carrier)) carrierPlanNames.set(carrier, []);
+            }
+            carrierPlanNames.get(carrier)!.push(resolved.planName || enrollPlanName);
+
+            // Groups: track enrolled + premium per group per carrier
+            if (!carrierGroups.has(carrier)) carrierGroups.set(carrier, new Map());
+            const groupMap = carrierGroups.get(carrier)!;
+            if (!groupMap.has(groupName)) groupMap.set(groupName, { enrolled: 0, premium: 0 });
+
+            // Premium rows
+            if (!carrierPremiumRows.has(carrier)) carrierPremiumRows.set(carrier, []);
+            carrierPremiumRows.get(carrier)!.push({
+              name: empName,
+              group: groupName,
+              planName: resolved.planName || enrollPlanName,
+              planType: resolved.planType,
+              tier,
+              planCost,
+            });
           }
-          if (!isQualifying) continue;
 
-          // Resolve carrier
-          const enrollPlanId = String(enrollment.PlanIdentifier || enrollment.PlanId || enrollment.PlanID || "");
-          const enrollPlanName = String(enrollment.PlanName || enrollment.Plan || enrollment.Name || "");
+          // After processing all enrollments for this employee
+          for (const carrier of enrolledCarriers) {
+            // Enrolled list
+            if (!carrierEnrolled.has(carrier)) carrierEnrolled.set(carrier, []);
+            carrierEnrolled.get(carrier)!.push({
+              name: empName,
+              group: groupName,
+              employeeId: emp.employeeId,
+              plans: carrierPlanNames.get(carrier) || [],
+            });
 
-          let resolved: { carrier: string; planName: string; planType: string } | undefined;
-          if (enrollPlanId) {
-            resolved = planIdLookup.get(enrollPlanId);
-            if (!resolved && enrollPlanName) resolved = planNameLookup.get(enrollPlanName);
-          } else if (enrollPlanName) {
-            resolved = planNameLookup.get(enrollPlanName);
+            // Group enrolled count (once per employee)
+            const groupMap = carrierGroups.get(carrier)!;
+            const gd = groupMap.get(groupName)!;
+            gd.enrolled++;
           }
-          if (!resolved) continue;
-
-          const carrier = resolved.carrier;
-
-          // PlanCost
-          const rawCost = String(enrollment.PlanCost || enrollment.MonthlyPlanCost || "");
-          const cost = rawCost ? parseFloat(rawCost) : 0;
-          const planCost = !isNaN(cost) ? Math.round(cost * 100) / 100 : 0;
-
-          const tier = String(enrollment.CoverageLevel || enrollment.Tier || enrollment.CoverageTier || "");
-
-          // Track enrolled
-          if (!enrolledCarriers.has(carrier)) {
-            enrolledCarriers.add(carrier);
-            if (!carrierPlanNames.has(carrier)) carrierPlanNames.set(carrier, []);
-          }
-          carrierPlanNames.get(carrier)!.push(resolved.planName || enrollPlanName);
-
-          // Groups: track enrolled + premium per group per carrier
-          if (!carrierGroups.has(carrier)) carrierGroups.set(carrier, new Map());
-          const groupMap = carrierGroups.get(carrier)!;
-          if (!groupMap.has(groupName)) groupMap.set(groupName, { enrolled: 0, premium: 0 });
-
-          // Premium rows
-          if (!carrierPremiumRows.has(carrier)) carrierPremiumRows.set(carrier, []);
-          carrierPremiumRows.get(carrier)!.push({
-            name: empName,
-            group: groupName,
-            planName: resolved.planName || enrollPlanName,
-            planType: resolved.planType,
-            tier,
-            planCost,
-          });
-        }
-
-        // After processing all enrollments for this employee
-        for (const carrier of enrolledCarriers) {
-          // Enrolled list
-          if (!carrierEnrolled.has(carrier)) carrierEnrolled.set(carrier, []);
-          carrierEnrolled.get(carrier)!.push({
-            name: empName,
-            group: groupName,
-            employeeId: emp.employeeId,
-            plans: carrierPlanNames.get(carrier) || [],
-          });
-
-          // Group enrolled count (once per employee)
-          const groupMap = carrierGroups.get(carrier)!;
-          const gd = groupMap.get(groupName)!;
-          gd.enrolled++;
         }
       }
     }
@@ -207,16 +222,28 @@ export async function GET(request: NextRequest) {
       for (const clientId of clientIds) {
         const cd = companyData.get(clientId);
         if (!cd) continue;
-        // We need employee names — pull from snapshot employees
-        const snapshot = snapshots.find((s) => s.clientId === clientId);
-        if (!snapshot) continue;
-        for (const emp of snapshot.employees) {
-          if ((emp.status || "Active").toLowerCase() !== "active") continue;
-          carrierEligible.get(carrier)!.push({
-            name: `${emp.firstName} ${emp.lastName}`.trim(),
-            group: cd.groupName,
-            employeeId: emp.employeeId,
+        // Fetch employee names in batches
+        const snap = snapshots.find((s) => s.clientId === clientId);
+        if (!snap) continue;
+        let eligSkip = 0;
+        let eligMore = true;
+        while (eligMore) {
+          const eligBatch = await prisma.employeeSnapshot.findMany({
+            where: { clientSnapshotId: snap.id },
+            select: { employeeId: true, firstName: true, lastName: true, status: true },
+            take: 500,
+            skip: eligSkip,
           });
+          if (eligBatch.length < 500) eligMore = false;
+          eligSkip += 500;
+          for (const emp of eligBatch) {
+            if ((emp.status || "Active").toLowerCase() !== "active") continue;
+            carrierEligible.get(carrier)!.push({
+              name: `${emp.firstName} ${emp.lastName}`.trim(),
+              group: cd.groupName,
+              employeeId: emp.employeeId,
+            });
+          }
         }
       }
     }

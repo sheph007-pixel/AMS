@@ -7,10 +7,10 @@ import { getExclusionRules, isExcluded } from "@/lib/exclusions";
 /**
  * Production Report — Full detail for Reagan Consulting.
  *
- * Outputs one row per client × carrier × planType × month
- * for fiscal years 2022–2025 (all uploaded periods).
+ * MEMORY-OPTIMIZED: Processes one snapshot at a time instead of loading
+ * all snapshots with employees into memory simultaneously.
  *
- * Fee model (same as Income Report):
+ * Fee model:
  *   PEPM carriers (EBPA, HealthEZ): enrolled × $20/mo
  *   Commission carriers (Guardian, VSP): premium × 10%
  */
@@ -50,13 +50,16 @@ export async function GET() {
   try {
     const exclusionRules = await getExclusionRules();
 
-    // Fetch ALL snapshots for fiscal years 2022-2025 (plus 2026 if available)
-    const snapshots = await prisma.clientSnapshot.findMany({
+    // Step 1: Fetch snapshot IDs + client info only (NO employees)
+    const snapshotList = await prisma.clientSnapshot.findMany({
       where: { year: { gte: 2022 } },
-      include: {
-        client: true,
-        benefitPlans: true,
-        employees: true,
+      select: {
+        id: true,
+        year: true,
+        month: true,
+        sicCode: true,
+        state: true,
+        client: { select: { groupId: true, groupName: true } },
       },
       orderBy: [{ year: "asc" }, { month: "asc" }],
     });
@@ -71,28 +74,32 @@ export async function GET() {
     let employeesProcessed = 0;
     let enrollmentsProcessed = 0;
 
-    for (const snapshot of snapshots) {
-      if (isExcluded({ groupName: snapshot.client.groupName }, exclusionRules)) {
+    // Step 2: Process each snapshot individually
+    for (const snap of snapshotList) {
+      if (isExcluded({ groupName: snap.client.groupName }, exclusionRules)) {
         snapshotsSkipped++;
         continue;
       }
       snapshotsProcessed++;
 
-      const { year, month } = snapshot;
+      const { year, month } = snap;
       const periodKey = `${year}-${String(month).padStart(2, "0")}`;
       periodsSet.add(periodKey);
-      clientsSet.add(snapshot.client.groupId);
+      clientsSet.add(snap.client.groupId);
 
-      // Build plan lookup maps (PlanIdentifier → carrier, planName → carrier)
+      // Fetch benefit plans for this snapshot
+      const benefitPlans = await prisma.benefitPlan.findMany({
+        where: { clientSnapshotId: snap.id },
+      });
+
+      // Build plan lookup maps
       const planIdToInfo = new Map<string, { carrier: string; planType: string; planName: string }>();
       const planNameToInfo = new Map<string, { carrier: string; planType: string; planName: string }>();
 
-      for (const bp of snapshot.benefitPlans) {
+      for (const bp of benefitPlans) {
         if (isExcluded({ carrier: bp.carrier, planName: bp.planName, planType: bp.planType }, exclusionRules)) continue;
-
         const carrier = bp.carrier || "Unspecified Carrier";
         const info = { carrier, planType: bp.planType, planName: bp.planName || "" };
-
         if (bp.metadata) {
           try {
             const meta = JSON.parse(bp.metadata);
@@ -105,9 +112,8 @@ export async function GET() {
 
       if (planIdToInfo.size === 0 && planNameToInfo.size === 0) continue;
 
-      // Aggregate: client × carrier × planType → { eligible, enrolled, premium }
-      type AggKey = string;
-      const agg = new Map<AggKey, {
+      // Aggregate: carrier × planType → counts + premium
+      const agg = new Map<string, {
         carrier: string;
         planType: string;
         planName: string;
@@ -126,58 +132,67 @@ export async function GET() {
         return entry;
       }
 
-      // Process employees
-      for (const emp of snapshot.employees) {
-        if ((emp.status || "Active").toLowerCase() !== "active") continue;
-        if (!emp.metadata) continue;
-        employeesProcessed++;
+      // Fetch employees in batches for this snapshot
+      const BATCH_SIZE = 500;
+      let skip = 0;
+      let hasMore = true;
 
-        let meta: any;
-        try { meta = JSON.parse(emp.metadata); } catch { continue; }
+      while (hasMore) {
+        const employees = await prisma.employeeSnapshot.findMany({
+          where: { clientSnapshotId: snap.id },
+          select: { employeeId: true, status: true, metadata: true },
+          take: BATCH_SIZE,
+          skip,
+        });
 
-        const enrollments = findEnrollmentsFromMeta(meta);
-        const empKey = emp.employeeId;
+        if (employees.length < BATCH_SIZE) hasMore = false;
+        skip += BATCH_SIZE;
 
-        for (const enrollment of enrollments) {
-          enrollmentsProcessed++;
-          // Enrollment qualification (same logic as income report)
-          const enrollmentType = enrollment.EnrollmentType || enrollment.enrollmentType || enrollment.Type;
-          let isQualifying = false;
-          if (enrollmentType) {
-            isQualifying = String(enrollmentType).toLowerCase() === "current";
-          } else {
-            const declineReason = enrollment.DeclineReason || enrollment.declineReason;
-            const endDate = enrollment.CoverageEndDate || enrollment.EndDate || enrollment.EndedOn;
-            const isEnded = endDate && new Date(String(endDate)) <= new Date();
-            isQualifying = !declineReason && !isEnded;
-          }
+        for (const emp of employees) {
+          if ((emp.status || "Active").toLowerCase() !== "active") continue;
+          if (!emp.metadata) continue;
+          employeesProcessed++;
 
-          // Resolve carrier + plan info
-          const enrollPlanId = String(enrollment.PlanIdentifier || enrollment.PlanId || enrollment.PlanID || "");
-          const enrollPlanName = String(enrollment.PlanName || enrollment.Plan || enrollment.Name || "");
+          let meta: any;
+          try { meta = JSON.parse(emp.metadata); } catch { continue; }
 
-          let info: { carrier: string; planType: string; planName: string } | undefined;
-          if (enrollPlanId) {
-            info = planIdToInfo.get(enrollPlanId);
-            if (!info && enrollPlanName) info = planNameToInfo.get(enrollPlanName);
-          } else if (enrollPlanName) {
-            info = planNameToInfo.get(enrollPlanName);
-          }
-          if (!info) continue;
+          const enrollments = findEnrollmentsFromMeta(meta);
 
-          const entry = getAgg(info.carrier, info.planType, info.planName);
+          for (const enrollment of enrollments) {
+            enrollmentsProcessed++;
+            const enrollmentType = enrollment.EnrollmentType || enrollment.enrollmentType || enrollment.Type;
+            let isQualifying = false;
+            if (enrollmentType) {
+              isQualifying = String(enrollmentType).toLowerCase() === "current";
+            } else {
+              const declineReason = enrollment.DeclineReason || enrollment.declineReason;
+              const endDate = enrollment.CoverageEndDate || enrollment.EndDate || enrollment.EndedOn;
+              const isEnded = endDate && new Date(String(endDate)) <= new Date();
+              isQualifying = !declineReason && !isEnded;
+            }
 
-          // Every employee with an enrollment is eligible
-          entry.eligibleSet.add(empKey);
+            const enrollPlanId = String(enrollment.PlanIdentifier || enrollment.PlanId || enrollment.PlanID || "");
+            const enrollPlanName = String(enrollment.PlanName || enrollment.Plan || enrollment.Name || "");
 
-          if (isQualifying) {
-            entry.enrolledSet.add(empKey);
+            let info: { carrier: string; planType: string; planName: string } | undefined;
+            if (enrollPlanId) {
+              info = planIdToInfo.get(enrollPlanId);
+              if (!info && enrollPlanName) info = planNameToInfo.get(enrollPlanName);
+            } else if (enrollPlanName) {
+              info = planNameToInfo.get(enrollPlanName);
+            }
+            if (!info) continue;
 
-            // PlanCost
-            const rawCost = String(enrollment.PlanCost || enrollment.MonthlyPlanCost || "");
-            if (rawCost) {
-              const parsed = parseFloat(rawCost);
-              if (!isNaN(parsed)) entry.premium += parsed;
+            const entry = getAgg(info.carrier, info.planType, info.planName);
+            entry.eligibleSet.add(emp.employeeId);
+
+            if (isQualifying) {
+              entry.enrolledSet.add(emp.employeeId);
+              const rawCost = String(enrollment.PlanCost || enrollment.MonthlyPlanCost || "");
+              if (rawCost) {
+                const parsed = parseFloat(rawCost);
+                if (!isNaN(parsed)) entry.premium += parsed;
+              }
             }
           }
         }
@@ -213,10 +228,10 @@ export async function GET() {
           year,
           month,
           transactionDate: `${year}-${String(month).padStart(2, "0")}-01`,
-          clientName: snapshot.client.groupName,
-          clientCode: snapshot.client.groupId,
-          sicCode: snapshot.sicCode || "",
-          state: snapshot.state || "",
+          clientName: snap.client.groupName,
+          clientCode: snap.client.groupId,
+          sicCode: snap.sicCode || "",
+          state: snap.state || "",
           carrier: entry.carrier,
           lineOfBusiness: entry.planType,
           planName: entry.planName,
@@ -246,7 +261,6 @@ export async function GET() {
       const prevTotal = prevY * 12 + prevM;
       const currTotal = currY * 12 + currM;
       if (currTotal - prevTotal > 1) {
-        // There's a gap — list missing months
         for (let t = prevTotal + 1; t < currTotal; t++) {
           const gY = Math.floor((t - 1) / 12);
           const gM = ((t - 1) % 12) + 1;
@@ -255,7 +269,6 @@ export async function GET() {
       }
     }
 
-    // Cross-check: sum rows premium vs totalPremium
     const rowPremiumSum = Math.round(rows.reduce((s, r) => s + r.monthlyPremium, 0) * 100) / 100;
     const rowFeeSum = Math.round(rows.reduce((s, r) => s + r.estMonthlyFee, 0) * 100) / 100;
 
@@ -270,7 +283,7 @@ export async function GET() {
       },
       audit: {
         generatedAt: new Date().toISOString(),
-        snapshotsQueried: snapshots.length,
+        snapshotsQueried: snapshotList.length,
         snapshotsProcessed,
         snapshotsSkipped,
         employeesProcessed,

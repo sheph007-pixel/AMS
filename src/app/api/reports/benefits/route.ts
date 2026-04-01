@@ -67,7 +67,6 @@ export async function GET() {
       include: {
         client: true,
         benefitPlans: true,
-        employees: true,
       },
     });
 
@@ -78,7 +77,6 @@ export async function GET() {
           include: {
             client: true,
             benefitPlans: true,
-            employees: true,
           },
         })
       : [];
@@ -231,113 +229,127 @@ export async function GET() {
 
       if (planIdToCarrier.size === 0 && planNameToCarrier.size === 0) continue;
 
-      // Process employees
-      for (const emp of snapshot.employees) {
-        const status = (emp.status || "Active").toLowerCase();
-        if (status !== "active") continue;
+      // Process employees in batches to avoid loading all into memory
+      const BATCH_SIZE = 500;
+      let skip = 0;
+      let hasMore = true;
+      while (hasMore) {
+        const employeeBatch = await prisma.employeeSnapshot.findMany({
+          where: { clientSnapshotId: snapshot.id },
+          select: { employeeId: true, status: true, metadata: true },
+          take: BATCH_SIZE,
+          skip,
+        });
+        if (employeeBatch.length < BATCH_SIZE) hasMore = false;
+        skip += BATCH_SIZE;
 
-        totalActiveEmployees++;
-        const empKey = `${clientId}::${emp.employeeId}`;
-        companyInfo.get(clientId)!.activeEmployees.add(empKey);
+        for (const emp of employeeBatch) {
+          const status = (emp.status || "Active").toLowerCase();
+          if (status !== "active") continue;
 
-        if (!emp.metadata) continue;
-        let meta: any;
-        try { meta = JSON.parse(emp.metadata); } catch { continue; }
+          totalActiveEmployees++;
+          const empKey = `${clientId}::${emp.employeeId}`;
+          companyInfo.get(clientId)!.activeEmployees.add(empKey);
 
-        const enrollments = findEnrollmentsFromMeta(meta);
-        const enrolledCarriersThisEmp = new Set<string>();
+          if (!emp.metadata) continue;
+          let meta: any;
+          try { meta = JSON.parse(emp.metadata); } catch { continue; }
 
-        for (const enrollment of enrollments) {
-          // ── Filter: EnrollmentType = "Current" ──
-          const enrollmentType =
-            enrollment.EnrollmentType || enrollment.enrollmentType || enrollment.Type;
-          let isQualifying = false;
-          if (enrollmentType) {
-            isQualifying = String(enrollmentType).toLowerCase() === "current";
-          } else {
-            // Fallback if EnrollmentType not in XML
-            const declineReason = enrollment.DeclineReason || enrollment.declineReason;
-            const endDate = enrollment.CoverageEndDate || enrollment.EndDate || enrollment.EndedOn;
-            const isEnded = endDate && new Date(String(endDate)) <= new Date();
-            isQualifying = !declineReason && !isEnded;
-          }
+          const enrollments = findEnrollmentsFromMeta(meta);
+          const enrolledCarriersThisEmp = new Set<string>();
 
-          if (!isQualifying) continue;
+          for (const enrollment of enrollments) {
+            // ── Filter: EnrollmentType = "Current" ──
+            const enrollmentType =
+              enrollment.EnrollmentType || enrollment.enrollmentType || enrollment.Type;
+            let isQualifying = false;
+            if (enrollmentType) {
+              isQualifying = String(enrollmentType).toLowerCase() === "current";
+            } else {
+              // Fallback if EnrollmentType not in XML
+              const declineReason = enrollment.DeclineReason || enrollment.declineReason;
+              const endDate = enrollment.CoverageEndDate || enrollment.EndDate || enrollment.EndedOn;
+              const isEnded = endDate && new Date(String(endDate)) <= new Date();
+              isQualifying = !declineReason && !isEnded;
+            }
 
-          // ── Resolve carrier via PlanIdentifier → Plan → Carrier ──
-          const enrollPlanId = String(
-            enrollment.PlanIdentifier || enrollment.PlanId || enrollment.PlanID || ""
-          );
-          const enrollPlanName = String(
-            enrollment.PlanName || enrollment.Plan || enrollment.Name || ""
-          );
+            if (!isQualifying) continue;
 
-          let carrier: string | undefined;
-          let planType: string | undefined;
+            // ── Resolve carrier via PlanIdentifier → Plan → Carrier ──
+            const enrollPlanId = String(
+              enrollment.PlanIdentifier || enrollment.PlanId || enrollment.PlanID || ""
+            );
+            const enrollPlanName = String(
+              enrollment.PlanName || enrollment.Plan || enrollment.Name || ""
+            );
 
-          if (enrollPlanId) {
-            carrier = planIdToCarrier.get(enrollPlanId);
-            planType = planIdToPlanType.get(enrollPlanId);
-            if (!carrier) {
-              exceptions.unmatchedPlanIdentifier++;
-              // Fallback to plan name
+            let carrier: string | undefined;
+            let planType: string | undefined;
+
+            if (enrollPlanId) {
+              carrier = planIdToCarrier.get(enrollPlanId);
+              planType = planIdToPlanType.get(enrollPlanId);
+              if (!carrier) {
+                exceptions.unmatchedPlanIdentifier++;
+                // Fallback to plan name
+                if (enrollPlanName) {
+                  carrier = planNameToCarrier.get(enrollPlanName);
+                  planType = planNameToPlanType.get(enrollPlanName);
+                  if (carrier) exceptions.fallbackPlanNameMatch++;
+                }
+              }
+            } else {
+              exceptions.missingPlanIdentifier++;
               if (enrollPlanName) {
                 carrier = planNameToCarrier.get(enrollPlanName);
                 planType = planNameToPlanType.get(enrollPlanName);
                 if (carrier) exceptions.fallbackPlanNameMatch++;
               }
             }
-          } else {
-            exceptions.missingPlanIdentifier++;
-            if (enrollPlanName) {
-              carrier = planNameToCarrier.get(enrollPlanName);
-              planType = planNameToPlanType.get(enrollPlanName);
-              if (carrier) exceptions.fallbackPlanNameMatch++;
-            }
-          }
 
-          if (!carrier) continue;
+            if (!carrier) continue;
 
-          // Track EndDate exception
-          const endDate = enrollment.EndDate || enrollment.CoverageEndDate || enrollment.EndedOn;
-          if (endDate) exceptions.currentEnrollmentsWithEndDate++;
+            // Track EndDate exception
+            const endDate = enrollment.EndDate || enrollment.CoverageEndDate || enrollment.EndedOn;
+            if (endDate) exceptions.currentEnrollmentsWithEndDate++;
 
-          // ── PlanCost ──
-          const rawCost = String(
-            enrollment.PlanCost || enrollment.MonthlyPlanCost || ""
-          );
-          let cost = 0;
-          if (rawCost) {
-            const parsed = parseFloat(rawCost);
-            if (!isNaN(parsed)) {
-              cost = parsed;
+            // ── PlanCost ──
+            const rawCost = String(
+              enrollment.PlanCost || enrollment.MonthlyPlanCost || ""
+            );
+            let cost = 0;
+            if (rawCost) {
+              const parsed = parseFloat(rawCost);
+              if (!isNaN(parsed)) {
+                cost = parsed;
+              } else {
+                exceptions.blankOrInvalidPlanCost++;
+              }
             } else {
               exceptions.blankOrInvalidPlanCost++;
             }
-          } else {
-            exceptions.blankOrInvalidPlanCost++;
-          }
 
-          // ── Aggregate: carrier level ──
-          const cd = getOrCreateCarrier(carrier);
-          cd.enrollmentRows++;
-          cd.monthlyPremium += cost;
+            // ── Aggregate: carrier level ──
+            const cd = getOrCreateCarrier(carrier);
+            cd.enrollmentRows++;
+            cd.monthlyPremium += cost;
 
-          if (!enrolledCarriersThisEmp.has(carrier)) {
-            enrolledCarriersThisEmp.add(carrier);
-            cd.enrolledEmployees.add(empKey);
-          }
+            if (!enrolledCarriersThisEmp.has(carrier)) {
+              enrolledCarriersThisEmp.add(carrier);
+              cd.enrolledEmployees.add(empKey);
+            }
 
-          // ── Aggregate: company-carrier level ──
-          const ccd = getCompanyCarrier(carrier, clientId);
-          ccd.enrollmentRows++;
-          ccd.premium += cost;
-          ccd.distinctEnrolled.add(empKey);
+            // ── Aggregate: company-carrier level ──
+            const ccd = getCompanyCarrier(carrier, clientId);
+            ccd.enrollmentRows++;
+            ccd.premium += cost;
+            ccd.distinctEnrolled.add(empKey);
 
-          // ── Aggregate: company plan-type level ──
-          if (planType) {
-            const cpt = getCompanyPlanTypes(clientId);
-            cpt[planType].add(emp.employeeId);
+            // ── Aggregate: company plan-type level ──
+            if (planType) {
+              const cpt = getCompanyPlanTypes(clientId);
+              cpt[planType].add(emp.employeeId);
+            }
           }
         }
       }
@@ -500,44 +512,59 @@ export async function GET() {
 
       if (planIdToCarrier.size === 0 && planNameToCarrier.size === 0) continue;
 
-      for (const emp of snapshot.employees) {
-        const status = (emp.status || "Active").toLowerCase();
-        if (status !== "active") continue;
-        prevTotalActiveEmployees++;
+      // Process previous period employees in batches
+      const PREV_BATCH_SIZE = 500;
+      let prevSkip = 0;
+      let prevHasMore = true;
+      while (prevHasMore) {
+        const employeeBatch = await prisma.employeeSnapshot.findMany({
+          where: { clientSnapshotId: snapshot.id },
+          select: { employeeId: true, status: true, metadata: true },
+          take: PREV_BATCH_SIZE,
+          skip: prevSkip,
+        });
+        if (employeeBatch.length < PREV_BATCH_SIZE) prevHasMore = false;
+        prevSkip += PREV_BATCH_SIZE;
 
-        if (!emp.metadata) continue;
-        let meta: any;
-        try { meta = JSON.parse(emp.metadata); } catch { continue; }
+        for (const emp of employeeBatch) {
+          const status = (emp.status || "Active").toLowerCase();
+          if (status !== "active") continue;
+          prevTotalActiveEmployees++;
 
-        const enrollments = findEnrollmentsFromMeta(meta);
-        for (const enrollment of enrollments) {
-          const enrollmentType = enrollment.EnrollmentType || enrollment.enrollmentType || enrollment.Type;
-          let isQualifying = false;
-          if (enrollmentType) {
-            isQualifying = String(enrollmentType).toLowerCase() === "current";
-          } else {
-            const declineReason = enrollment.DeclineReason || enrollment.declineReason;
-            const endDate = enrollment.CoverageEndDate || enrollment.EndDate || enrollment.EndedOn;
-            const isEnded = endDate && new Date(String(endDate)) <= new Date();
-            isQualifying = !declineReason && !isEnded;
-          }
-          if (!isQualifying) continue;
+          if (!emp.metadata) continue;
+          let meta: any;
+          try { meta = JSON.parse(emp.metadata); } catch { continue; }
 
-          const enrollPlanId = String(enrollment.PlanIdentifier || enrollment.PlanId || enrollment.PlanID || "");
-          const enrollPlanName = String(enrollment.PlanName || enrollment.Plan || enrollment.Name || "");
-          let carrier: string | undefined;
-          if (enrollPlanId) {
-            carrier = planIdToCarrier.get(enrollPlanId);
-            if (!carrier && enrollPlanName) carrier = planNameToCarrier.get(enrollPlanName);
-          } else if (enrollPlanName) {
-            carrier = planNameToCarrier.get(enrollPlanName);
-          }
-          if (!carrier) continue;
+          const enrollments = findEnrollmentsFromMeta(meta);
+          for (const enrollment of enrollments) {
+            const enrollmentType = enrollment.EnrollmentType || enrollment.enrollmentType || enrollment.Type;
+            let isQualifying = false;
+            if (enrollmentType) {
+              isQualifying = String(enrollmentType).toLowerCase() === "current";
+            } else {
+              const declineReason = enrollment.DeclineReason || enrollment.declineReason;
+              const endDate = enrollment.CoverageEndDate || enrollment.EndDate || enrollment.EndedOn;
+              const isEnded = endDate && new Date(String(endDate)) <= new Date();
+              isQualifying = !declineReason && !isEnded;
+            }
+            if (!isQualifying) continue;
 
-          const rawCost = String(enrollment.PlanCost || enrollment.MonthlyPlanCost || "");
-          if (rawCost) {
-            const parsed = parseFloat(rawCost);
-            if (!isNaN(parsed)) prevTotalPremium += parsed;
+            const enrollPlanId = String(enrollment.PlanIdentifier || enrollment.PlanId || enrollment.PlanID || "");
+            const enrollPlanName = String(enrollment.PlanName || enrollment.Plan || enrollment.Name || "");
+            let carrier: string | undefined;
+            if (enrollPlanId) {
+              carrier = planIdToCarrier.get(enrollPlanId);
+              if (!carrier && enrollPlanName) carrier = planNameToCarrier.get(enrollPlanName);
+            } else if (enrollPlanName) {
+              carrier = planNameToCarrier.get(enrollPlanName);
+            }
+            if (!carrier) continue;
+
+            const rawCost = String(enrollment.PlanCost || enrollment.MonthlyPlanCost || "");
+            if (rawCost) {
+              const parsed = parseFloat(rawCost);
+              if (!isNaN(parsed)) prevTotalPremium += parsed;
+            }
           }
         }
       }
