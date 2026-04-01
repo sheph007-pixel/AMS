@@ -21,6 +21,19 @@ const featuredReport = {
 
 const reports = [
   {
+    id: "production-dashboard",
+    name: "Production Dashboard",
+    description: "Monthly production by group with carrier billing income, configurable carrier settings, and full raw export for diligence",
+    href: "/reports/production-dashboard",
+    iconBg: "bg-bob-teal-light",
+    icon: (
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#14B8A6" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+        <rect x="3" y="3" width="18" height="18" rx="2" />
+        <path d="M3 9h18" /><path d="M9 21V9" />
+      </svg>
+    ),
+  },
+  {
     id: "benefits",
     name: "Benefits Report",
     description: "Carrier-level summary of eligible/enrolled employees, plans, and costs with full reconciliation audit",

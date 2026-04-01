@@ -14,7 +14,23 @@ async function main() {
     },
   });
 
-  console.log("Seed complete: default exclusion rules applied.");
+  // Seed default carrier settings
+  const defaultCarrierSettings = [
+    { carrierName: "EBPA", incomeMethod: "PEPM", rate: 20 },
+    { carrierName: "HealthEZ", incomeMethod: "PEPM", rate: 20 },
+    { carrierName: "Guardian", incomeMethod: "PERCENT_PREMIUM", rate: 10 },
+    { carrierName: "VSP", incomeMethod: "PERCENT_PREMIUM", rate: 10 },
+  ];
+
+  for (const cs of defaultCarrierSettings) {
+    await prisma.carrierSetting.upsert({
+      where: { carrierName: cs.carrierName },
+      update: {},
+      create: cs,
+    });
+  }
+
+  console.log("Seed complete: default exclusion rules and carrier settings applied.");
 
   // Warm report cache on startup
   try {

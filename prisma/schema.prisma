@@ -185,6 +185,20 @@ model FinancialSummary {
   @@unique([entityId, accountId, year, month, statementType])
 }
 
+// ─── Carrier Settings ───────────────────────────────────────────────────────
+
+/// Carrier-level income method configuration.
+/// Each carrier uses exactly one method: PEPM, PERCENT_PREMIUM, or NONE.
+model CarrierSetting {
+  id           String @id @default(cuid())
+  carrierName  String @unique /// Carrier name as it appears in EN XML
+  incomeMethod String /// PEPM, PERCENT_PREMIUM, or NONE
+  rate         Float  @default(0) /// PEPM dollar amount or percent (e.g. 20 or 10)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
 // ─── Report Cache ───────────────────────────────────────────────────────────
 
 /// Pre-computed report data. Rebuilt after each import.
