@@ -658,12 +658,15 @@ async function buildProductionDashboard(): Promise<any> {
       try { planMeta = bp.metadata ? JSON.parse(bp.metadata) : {}; } catch { /* */ }
 
       const policyNumber = getField(planMeta,
-        "PlanIdentifier", "PolicyNumber", "GroupPolicyNumber",
-        "ContractNumber", "GroupNumber", "PlanNumber", "PlanId", "PlanID"
+        "PolicyNumber", "GroupPolicyNumber", "GroupNumber",
+        "ContractNumber", "PlanNumber", "CertificateNumber",
+        "CarrierPlanNumber", "CarrierGroupNumber", "InsurancePolicyNumber"
       ) || "";
 
       const info = { carrier: bp.carrier || "Unspecified", planType: bp.planType || "Unknown", planName: bp.planName || "", policyNumber };
-      if (policyNumber) planIdMap.set(policyNumber, info);
+      // Key by EN internal PlanIdentifier (GUID) for matching employee enrollments
+      const planIdentifier = getField(planMeta, "PlanIdentifier", "PlanId", "PlanID") || "";
+      if (planIdentifier) planIdMap.set(planIdentifier, info);
       if (bp.planName) planNameMap.set(bp.planName, info);
       hasPlans = true;
     }
