@@ -249,8 +249,12 @@ function AuditPanel() {
       if (data.aiNote) {
         setDetail(prev => prev ? { ...prev, aiNote: data.aiNote } : { checks: [], aiNote: data.aiNote });
         setLatest(prev => prev ? { ...prev, aiReviewCompleted: true } : prev);
+      } else if (data.error) {
+        setDetail(prev => prev ? { ...prev, aiNote: `AI review unavailable: ${data.error}` } : { checks: [], aiNote: `AI review unavailable: ${data.error}` });
       }
-    } catch { /* */ }
+    } catch (e) {
+      setDetail(prev => prev ? { ...prev, aiNote: `AI review failed: ${e instanceof Error ? e.message : "network error"}` } : { checks: [], aiNote: "AI review failed: network error" });
+    }
     setAiRunning(false);
   }
 

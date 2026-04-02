@@ -291,12 +291,13 @@ export async function runProductionAudit(reportType: string = "production-dashbo
   });
 
   // Check 16: Months with plans but zero qualifying enrollments (informational)
-  if (monthsWithPlansNoEnrollments.length > 0) {
+  if (monthsWithPlansNoEnrollments.size > 0) {
+    const sortedEmpty = Array.from(monthsWithPlansNoEnrollments).sort();
     checks.push({
       name: "months-plans-no-enrollments",
       status: "warning",
-      message: `${monthsWithPlansNoEnrollments.length} month(s) have plans but zero qualifying enrollments: ${monthsWithPlansNoEnrollments.join(", ")}. This is acceptable if all employees are termed/inactive.`,
-      expected: 0, actual: monthsWithPlansNoEnrollments.length,
+      message: `${sortedEmpty.length} distinct month(s) have snapshots with plans but zero qualifying enrollments: ${sortedEmpty.join(", ")}. This is acceptable if all employees in those snapshots are termed/inactive.`,
+      expected: 0, actual: sortedEmpty.length,
     });
   }
 
@@ -357,7 +358,7 @@ async function recomputeDashboard(exclusionRules: { field: string; value: string
   const clientMap = new Map<string, EntitySubtotal>();
   const carrierMap = new Map<string, EntitySubtotal>();
   let totalRows = 0, totalLives = 0, totalPremium = 0, totalIncome = 0;
-  const monthsWithPlansNoEnrollments: string[] = [];
+  const monthsWithPlansNoEnrollments = new Set<string>();
 
   for (const snap of snapshotList) {
     // Same filters as dashboard lines 767-769
@@ -464,7 +465,7 @@ async function recomputeDashboard(exclusionRules: { field: string; value: string
     }
 
     if (tierAgg.size === 0 && hasPlans) {
-      monthsWithPlansNoEnrollments.push(period);
+      monthsWithPlansNoEnrollments.add(period);
     }
 
     // Convert to totals — same as dashboard lines 902-947
