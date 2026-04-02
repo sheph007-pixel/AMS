@@ -233,8 +233,8 @@ function AuditPanel() {
         body: JSON.stringify({ reportType: "production-dashboard" }),
       });
       const data = await res.json();
-      setLatest({ ...data, createdAt: new Date().toISOString() });
-      setDetail({ checks: data.checks });
+      setLatest(data);
+      setDetail({ checks: data.checks || [] });
       setExpanded(true);
     } catch { /* */ }
     setRunning(false);

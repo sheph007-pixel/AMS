@@ -41,7 +41,29 @@ export async function POST(req: NextRequest) {
       },
     });
 
-    return NextResponse.json({ id: audit.id, ...result });
+    return NextResponse.json({
+      id: audit.id,
+      reportType: audit.reportType,
+      status: result.status,
+      checksRun: result.checksRun,
+      checksPassed: result.checksPassed,
+      checksFailed: result.checksFailed,
+      checks: result.checks,
+      reportTotalRows: result.reportTotals.rows,
+      reportTotalLives: result.reportTotals.lives,
+      reportTotalPremium: result.reportTotals.premium,
+      reportTotalIncome: result.reportTotals.income,
+      auditTotalRows: result.auditTotals.rows,
+      auditTotalLives: result.auditTotals.lives,
+      auditTotalPremium: result.auditTotals.premium,
+      auditTotalIncome: result.auditTotals.income,
+      varianceRows: result.variances.rows,
+      varianceLives: result.variances.lives,
+      variancePremium: result.variances.premium,
+      varianceIncome: result.variances.income,
+      aiReviewCompleted: false,
+      createdAt: audit.createdAt,
+    });
   } catch (error) {
     console.error("Audit run error:", error);
     return NextResponse.json({ error: "Failed to run audit" }, { status: 500 });
