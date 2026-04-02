@@ -88,11 +88,10 @@ function downloadFile(content: string, filename: string, mimeType: string) {
 }
 
 const CSV_HEADERS = [
-  "Year", "Month", "Transaction Date", "Client Name", "Client Code", "SIC Code", "State",
-  "Insurance Carrier", "Line of Business", "Plan Name", "Coverage Type",
-  "Eligible Employees", "Enrolled Employees", "Monthly Premium",
-  "Fee Type", "Rate", "Est. Monthly Income", "Est. Annual Income",
-  "Agency Code", "Bill Type", "Producer", "Broker", "Department",
+  "Year", "Month", "Client Name", "Client Code",
+  "Insurance Carrier", "Plan Name", "Coverage Type",
+  "Eligible Employees", "Enrolled Employees", "Rate",
+  "Monthly Premium", "Fee Type", "Est. Monthly Income", "Est. Annual Income",
 ];
 
 const INCOME_DISCLAIMER = "Estimated Income is derived from enrollment and rate data and may not reconcile to accounting systems due to timing differences and external revenue sources.";
@@ -102,15 +101,13 @@ function toCSV(rows: ProductionRow[]): string {
   const header = CSV_HEADERS.map(h => `"${h}"`).join(",");
   const lines = rows.map(r =>
     [
-      r.year, monthName(r.month), r.transactionDate,
+      r.year, monthName(r.month),
       `"${r.clientName.replace(/"/g, '""')}"`, `"${r.clientCode}"`,
-      `"${r.sicCode}"`, `"${r.state}"`,
-      `"${r.carrier.replace(/"/g, '""')}"`, `"${r.lineOfBusiness}"`,
+      `"${r.carrier.replace(/"/g, '""')}"`,
       `"${r.planName.replace(/"/g, '""')}"`, `"${r.coverageType}"`,
-      r.eligible, r.enrolled, r.monthlyPremium.toFixed(2),
-      `"${r.feeType}"`, `"${r.rate}"`,
+      r.eligible, r.enrolled, `"${r.rate}"`,
+      r.monthlyPremium.toFixed(2), `"${r.feeType}"`,
       r.estMonthlyFee.toFixed(2), r.estAnnualFee.toFixed(2),
-      `"${r.agencyCode}"`, `"${r.billType}"`, `"${r.producer}"`, `"${r.broker}"`, `"${r.department}"`,
     ].join(",")
   );
   return [disclaimer, "", header, ...lines].join("\n");
@@ -190,27 +187,18 @@ function toExcelXML(rows: ProductionRow[], summary: Summary | null, methodology:
   const dictEntries: [string, string, string][] = [
     ["Year", "Fiscal year of the billing period", "XML filename date"],
     ["Month", "Month of the billing period", "XML filename date"],
-    ["Transaction Date", "First day of billing month (YYYY-MM-01)", "Derived"],
     ["Client Name", "Legal name of the group/company", "EN XML — EntityName"],
     ["Client Code", "Unique group identifier", "EN XML — CompanyIdentifier"],
-    ["SIC Code", "Standard Industrial Classification", "EN XML — SICCode"],
-    ["State", "Situs state of the group", "EN XML — SitusState"],
     ["Insurance Carrier", "Carrier/vendor name", "EN XML — Carrier on plan"],
-    ["Line of Business", "Plan type (Medical, Dental, etc.)", "EN XML — CarrierPlanTypeCode"],
     ["Plan Name", "Specific plan identifier", "EN XML — PlanName"],
     ["Coverage Type", "Group or Individual", "All records are Group"],
     ["Eligible Employees", "Employees with enrollment record", "EN enrollment count"],
     ["Enrolled Employees", "Actively enrolled (Current status)", "EN enrollment count"],
+    ["Rate", "Fee rate applied", "Carrier setting or standard fee schedule"],
     ["Monthly Premium", "Total monthly premium billed", "Sum of PlanCost"],
     ["Fee Type", "PEPM or Commission", "Carrier classification"],
-    ["Rate", "Fee rate applied", "Standard fee schedule"],
     ["Est. Monthly Income", "Estimated monthly income from enrollment and rate data", "Enrolled x PEPM rate, or premium x commission rate"],
     ["Est. Annual Income", "Estimated annual income (monthly x 12)", "Annualized"],
-    ["Agency Code", "Agency identifier", "KENNION"],
-    ["Bill Type", "Billing method", "Direct"],
-    ["Producer", "Producing agent", "Kennion Benefits"],
-    ["Broker", "Broker of record", "Kennion"],
-    ["Department", "Internal department", "Not tracked in EN"],
   ];
   for (const [col, desc, src] of dictEntries) {
     xml += `<Row>${cell(col)}${cell(desc)}${cell(src)}</Row>`;
@@ -227,27 +215,18 @@ function toExcelXML(rows: ProductionRow[], summary: Summary | null, methodology:
     xml += "<Row>";
     xml += numCell(r.year);
     xml += cell(monthName(r.month));
-    xml += cell(r.transactionDate);
     xml += cell(r.clientName);
     xml += cell(r.clientCode);
-    xml += cell(r.sicCode);
-    xml += cell(r.state);
     xml += cell(r.carrier);
-    xml += cell(r.lineOfBusiness);
     xml += cell(r.planName);
     xml += cell(r.coverageType);
     xml += numCell(r.eligible);
     xml += numCell(r.enrolled);
+    xml += cell(r.rate);
     xml += numCell(r.monthlyPremium, "Currency");
     xml += cell(r.feeType);
-    xml += cell(r.rate);
     xml += numCell(r.estMonthlyFee, "Currency");
     xml += numCell(r.estAnnualFee, "Currency");
-    xml += cell(r.agencyCode);
-    xml += cell(r.billType);
-    xml += cell(r.producer);
-    xml += cell(r.broker);
-    xml += cell(r.department);
     xml += "</Row>";
   }
   xml += `</Table></Worksheet>`;
@@ -393,9 +372,8 @@ export default function ProductionReportPage() {
       r.clientName.toLowerCase().includes(q) ||
       r.clientCode.toLowerCase().includes(q) ||
       r.carrier.toLowerCase().includes(q) ||
-      r.lineOfBusiness.toLowerCase().includes(q) ||
       r.planName.toLowerCase().includes(q) ||
-      r.state.toLowerCase().includes(q)
+      r.coverageType.toLowerCase().includes(q)
     );
   });
 
@@ -593,7 +571,7 @@ export default function ProductionReportPage() {
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
           <input
             type="text"
-            placeholder="Search by client, carrier, LOB, state..."
+            placeholder="Search by client, carrier, plan..."
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             className="w-full pl-10 pr-4 py-2.5 rounded-xl border border-bob-border bg-white text-sm text-bob-text placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-bob-purple/30 focus:border-bob-purple transition-all"
@@ -648,13 +626,13 @@ export default function ProductionReportPage() {
             <thead>
               <tr className="bg-gradient-to-r from-gray-50 to-gray-100 border-b border-bob-border">
                 {([
-                  ["transactionDate", "Date"],
+                  ["year", "Year"],
+                  ["month", "Month"],
                   ["clientName", "Client"],
                   ["clientCode", "Code"],
-                  ["state", "State"],
                   ["carrier", "Carrier"],
-                  ["lineOfBusiness", "LOB"],
                   ["planName", "Plan"],
+                  ["coverageType", "Type"],
                   ["enrolled", "Enrolled"],
                   ["monthlyPremium", "Premium"],
                   ["feeType", "Fee Type"],
@@ -673,13 +651,13 @@ export default function ProductionReportPage() {
             <tbody className="divide-y divide-gray-100">
               {sorted.slice(0, 500).map((r, i) => (
                 <tr key={i} className="hover:bg-purple-50/30 transition-colors">
-                  <td className="px-4 py-3 whitespace-nowrap text-bob-text-soft">{`${monthName(r.month)} ${r.year}`}</td>
+                  <td className="px-4 py-3 whitespace-nowrap text-bob-text-soft">{r.year}</td>
+                  <td className="px-4 py-3 whitespace-nowrap text-bob-text-soft">{monthName(r.month)}</td>
                   <td className="px-4 py-3 font-medium text-bob-text max-w-[200px] truncate" title={r.clientName}>{r.clientName}</td>
                   <td className="px-4 py-3 text-bob-text-soft font-mono text-xs">{r.clientCode}</td>
-                  <td className="px-4 py-3 text-bob-text-soft">{r.state}</td>
                   <td className="px-4 py-3 text-bob-text">{r.carrier}</td>
-                  <td className="px-4 py-3 text-bob-text-soft">{r.lineOfBusiness}</td>
                   <td className="px-4 py-3 text-bob-text-soft max-w-[160px] truncate" title={r.planName}>{r.planName}</td>
+                  <td className="px-4 py-3 text-bob-text-soft">{r.coverageType}</td>
                   <td className="px-4 py-3 text-right text-bob-text">{r.enrolled.toLocaleString()}</td>
                   <td className="px-4 py-3 text-right font-medium text-bob-text">{formatCurrency(r.monthlyPremium)}</td>
                   <td className="px-4 py-3 text-bob-text-soft">{r.feeType || "—"}</td>
@@ -868,27 +846,18 @@ export default function ProductionReportPage() {
                 {[
                   ["Year", "Fiscal year of the billing period", "XML filename date"],
                   ["Month", "Month of the billing period (1-12)", "XML filename date"],
-                  ["Transaction Date", "First day of the billing month (YYYY-MM-01)", "Derived from year/month"],
                   ["Client Name", "Legal name of the group/company", "Employee Navigator XML — EntityName"],
                   ["Client Code", "Unique group identifier", "Employee Navigator XML — CompanyIdentifier"],
-                  ["SIC Code", "Standard Industrial Classification code", "Employee Navigator XML — SICCode"],
-                  ["State", "Situs state of the group", "Employee Navigator XML — SitusState"],
                   ["Insurance Carrier", "Name of the insurance carrier/vendor", "Employee Navigator XML — Carrier field on plan"],
-                  ["Line of Business", "Plan type classification", "Derived from CarrierPlanTypeCode (Medical, Dental, Vision, Life, etc.)"],
                   ["Plan Name", "Specific plan name/identifier", "Employee Navigator XML — PlanName"],
                   ["Coverage Type", "Group or Individual", "All records are 'Group' (employer-sponsored)"],
                   ["Eligible Employees", "Employees with an enrollment record for this plan", "Count from Employee Navigator enrollments"],
                   ["Enrolled Employees", "Actively enrolled employees (Current status)", "Count from Employee Navigator enrollments"],
+                  ["Rate", "Fee rate applied", "Carrier setting or standard fee schedule"],
                   ["Monthly Premium", "Total monthly premium billed", "Sum of PlanCost from enrollment records"],
                   ["Fee Type", "PEPM or Commission (if applicable)", "Based on carrier classification"],
-                  ["Rate", "Fee rate applied ($20 PEPM or 10%)", "Standard fee schedule"],
                   ["Est. Monthly Income", "Estimated monthly income from enrollment and rate data", "Enrolled x PEPM rate, or Premium x Commission %"],
                   ["Est. Annual Income", "Estimated annual income (monthly x 12)", "Monthly income x 12"],
-                  ["Agency Code", "Agency identifier", "KENNION (single agency)"],
-                  ["Bill Type", "How the client is billed", "Direct (billed through Employee Navigator)"],
-                  ["Producer", "Producing broker/agent", "Kennion Benefits (house account)"],
-                  ["Broker", "Broker of record for the group", "Kennion"],
-                  ["Department", "Internal department code", "Not tracked in enrollment system"],
                 ].map(([col, desc, src], i) => (
                   <tr key={i} className="hover:bg-gray-50">
                     <td className="px-3 py-1.5 font-medium text-bob-text whitespace-nowrap">{col}</td>
