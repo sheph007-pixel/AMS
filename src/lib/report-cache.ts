@@ -742,7 +742,7 @@ async function buildProductionDashboard(): Promise<any> {
               "CoverageDescription", "TierName", "RateTier",
               "Relationship", "RelationshipType"
             ) || getField(enrollment,
-              "CoverageLevel", "Tier", "CoverageTier", "AgeBand"
+              "AgeBand", "CoverageLevel", "Tier", "CoverageTier"
             ) || "Employee";
 
             // Build plan name: append relationship suffix if present (e.g., "- Child", "- Spouse")
@@ -793,8 +793,8 @@ async function buildProductionDashboard(): Promise<any> {
         } else {
           // No nested enrollees — use enrollment-level fields directly
           const coverageTier = getField(enrollment,
-            "CoverageLevel", "Tier", "CoverageTier", "CoverageDescription",
-            "TierName", "RateTier", "AgeBand"
+            "AgeBand", "RateTier", "TierName",
+            "CoverageLevel", "Tier", "CoverageTier", "CoverageDescription"
           ) || "Employee";
 
           const dedupeKey = `${planKey}||${coverageTier}`;
