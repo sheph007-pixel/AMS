@@ -1,5 +1,7 @@
 import { XMLParser } from "fast-xml-parser";
 import { prisma } from "./db";
+import { extractXmlPaths } from "./xsd-parser";
+import { extractMappedValue } from "./schema-mapper";
 
 // Employee Navigator Broker Data Exchange XML parser
 const parser = new XMLParser({
@@ -18,6 +20,14 @@ const parser = new XMLParser({
   },
 });
 
+interface ImportTrace {
+  targetField: string;
+  sourceXmlPath: string;
+  fallbackUsed: boolean;
+  fallbackIndex: number;
+  value: string | null;
+}
+
 interface ImportResult {
   year: number;
   month: number | null;
@@ -27,6 +37,11 @@ interface ImportResult {
   clientsUpdated: number;
   benefitPlansCreated: number;
   employeesProcessed: number;
+  importMode: "legacy" | "schema";
+  schemaVersionId?: string;
+  discoveredFields?: number;
+  unmappedFields?: number;
+  traces?: ImportTrace[];
   debugStructure?: unknown;
   rawPreview?: string;
 }
@@ -70,7 +85,246 @@ function detectDateFromXml(parsed: any): { year: number; month: number } | null 
   return null;
 }
 
+/**
+ * Main entry point — routes to legacy or mapping-driven import based on active schema.
+ */
 export async function importAnnualXml(
+  xmlContent: string,
+  year?: number,
+  month?: number
+): Promise<ImportResult> {
+  // Check for active schema
+  const activeSchema = await prisma.schemaVersion.findFirst({
+    where: { status: "active" },
+    include: {
+      mappings: {
+        where: { active: true },
+        include: { schemaField: true },
+      },
+    },
+  });
+
+  // Discover XML paths and persist DiscoveredField records
+  let discoveredCount = 0;
+  let unmappedCount = 0;
+  try {
+    const paths = extractXmlPaths(xmlContent);
+    discoveredCount = paths.length;
+
+    const mappedPaths = activeSchema
+      ? new Set(activeSchema.mappings.map(m => m.xmlPath))
+      : new Set<string>();
+    unmappedCount = paths.filter(p => !mappedPaths.has(p)).length;
+
+    // Upsert discovered fields in background (non-blocking)
+    const schemaVersionId = activeSchema?.id || null;
+    for (const path of paths) {
+      prisma.discoveredField.upsert({
+        where: { xmlPath_schemaVersionId: { xmlPath: path, schemaVersionId: schemaVersionId || "none" } },
+        update: { lastSeenAt: new Date(), seenInImport: true },
+        create: { xmlPath: path, schemaVersionId, seenInImport: true },
+      }).catch(() => { /* ignore constraint errors */ });
+    }
+  } catch { /* don't fail import if discovery has issues */ }
+
+  if (activeSchema && activeSchema.mappings.length > 0) {
+    const result = await importWithMappings(xmlContent, activeSchema, year, month);
+    result.schemaVersionId = activeSchema.id;
+    result.discoveredFields = discoveredCount;
+    result.unmappedFields = unmappedCount;
+    return result;
+  }
+
+  const result = await importLegacy(xmlContent, year, month);
+  result.discoveredFields = discoveredCount;
+  result.unmappedFields = unmappedCount;
+  return result;
+}
+
+/**
+ * Mapping-driven import — uses active schema field mappings to extract values.
+ * Falls back to legacy extraction for fields without mappings.
+ */
+async function importWithMappings(
+  xmlContent: string,
+  activeSchema: { id: string; mappings: any[] },
+  year?: number,
+  month?: number
+): Promise<ImportResult> {
+  const parsed = parser.parse(xmlContent);
+  const detected = detectDateFromXml(parsed);
+  const resolvedYear = year || detected?.year || new Date().getFullYear();
+  const resolvedMonth = month || detected?.month || null;
+
+  // Build mapping lookup: elementName → mapping config
+  const mappingByName = new Map<string, { targetColumn: string; targetType: string; fallbackFields: string[]; elementName: string }>();
+  for (const m of activeSchema.mappings) {
+    if (!m.included || !m.targetColumn) continue;
+    const name = m.xmlPath.split(".").pop() || m.xmlPath;
+    let fallbacks: string[] = [];
+    try { fallbacks = m.fallbackFields ? JSON.parse(m.fallbackFields) : []; } catch { /* */ }
+    mappingByName.set(name, {
+      targetColumn: m.targetColumn,
+      targetType: m.targetType || "string",
+      fallbackFields: fallbacks,
+      elementName: name,
+    });
+  }
+
+  const traces: ImportTrace[] = [];
+
+  // Mapping-aware field extractor with trace
+  function extractMapped(obj: any, primaryField: string, ...legacyFallbacks: string[]): string | null {
+    const mapping = mappingByName.get(primaryField);
+    if (mapping) {
+      const allFields = [mapping.elementName, ...mapping.fallbackFields];
+      for (let i = 0; i < allFields.length; i++) {
+        const key = allFields[i];
+        const val = obj[key] ?? obj[`@_${key}`];
+        if (val !== undefined && val !== null && val !== "") {
+          traces.push({
+            targetField: mapping.targetColumn,
+            sourceXmlPath: key,
+            fallbackUsed: i > 0,
+            fallbackIndex: i,
+            value: String(val).substring(0, 100),
+          });
+          return String(val);
+        }
+      }
+    }
+    // Fall back to legacy extraction if no mapping or mapping didn't find a value
+    return extractField(obj, primaryField, ...legacyFallbacks);
+  }
+
+  // Load exclusion rules
+  const exclusionRules = await prisma.exclusionRule.findMany();
+
+  const companies = findCompanies(parsed);
+  const result: ImportResult = {
+    year: resolvedYear, month: resolvedMonth,
+    detectedDate: detected ? `${detected.year}-${String(detected.month).padStart(2, "0")}` : null,
+    clientsProcessed: 0, clientsCreated: 0, clientsUpdated: 0,
+    benefitPlansCreated: 0, employeesProcessed: 0,
+    importMode: "schema", traces,
+    debugStructure: describeStructure(parsed, 4),
+    rawPreview: xmlContent.substring(0, 2000),
+  };
+
+  for (const company of companies) {
+    // Use mapping-aware extraction with legacy fallback
+    const groupId = String(
+      extractMapped(company, "CompanyIdentifier", "Identifier", "GroupID", "groupId", "GroupId") ||
+      `unknown-${result.clientsProcessed}`
+    );
+    const groupName = String(
+      extractMapped(company, "EntityName", "Name", "GroupName", "groupName") || groupId
+    );
+    const sicCode = extractMapped(company, "SICCode", "SIC");
+    const situsState = extractMapped(company, "SitusState", "State", "StateAbbreviation");
+
+    let client = await prisma.client.findUnique({ where: { groupId } });
+    if (!client) {
+      client = await prisma.client.create({
+        data: { groupId, groupName, sicCode, state: situsState, metadata: JSON.stringify(collectAllFields(company)) },
+      });
+      result.clientsCreated++;
+    } else {
+      await prisma.client.update({
+        where: { id: client.id },
+        data: { groupName, sicCode: sicCode || client.sicCode, state: situsState || client.state, updatedAt: new Date() },
+      });
+      result.clientsUpdated++;
+    }
+
+    const existingSnapshot = await prisma.clientSnapshot.findUnique({
+      where: { clientId_year_month: { clientId: client.id, year: resolvedYear, month: resolvedMonth ?? 0 } },
+    });
+    if (existingSnapshot) await prisma.clientSnapshot.delete({ where: { id: existingSnapshot.id } });
+
+    const employees = findEmployees(company);
+    const plans = findPlans(company);
+    const { effectiveDate, renewalDate } = extractPlanDates(plans);
+
+    const snapshot = await prisma.clientSnapshot.create({
+      data: {
+        clientId: client.id, year: resolvedYear, month: resolvedMonth ?? 0,
+        groupName, totalEmployees: employees.length || null,
+        totalMembers: countTotalMembers(employees) || null,
+        effectiveDate, renewalDate, sicCode, state: situsState,
+        metadata: JSON.stringify(collectAllFields(company)),
+      },
+    });
+
+    const { enrolled: enrolledByPlan, eligible: eligibleByPlan, premiumByPlan } = countByPlan(employees, resolvedYear, resolvedMonth ?? 1);
+
+    for (const plan of plans) {
+      const planType = derivePlanType(plan);
+      const carrier = extractMapped(plan, "Carrier");
+      const planName = extractMapped(plan, "PlanName", "Name");
+
+      if (isExcluded({ carrier, planName, planType, groupName }, exclusionRules)) continue;
+
+      const planIdentifier = extractMapped(plan, "PlanIdentifier", "PlanId", "PlanID");
+      const planLevelCost = parseFloatSafe(
+        extractMapped(plan, "PlanCost", "MonthlyPlanCost", "TotalPremium", "Premium", "MonthlyPremium", "Cost", "Rate")
+      );
+      const enrollmentCost = (planIdentifier && premiumByPlan.get(planIdentifier)) || (planName && premiumByPlan.get(planName)) || null;
+      const premium = enrollmentCost ?? planLevelCost;
+      const enrolleeCount = (planIdentifier && enrolledByPlan.get(planIdentifier)) || (planName && enrolledByPlan.get(planName)) || null;
+      const eligibleCount = (planIdentifier && eligibleByPlan.get(planIdentifier)) || (planName && eligibleByPlan.get(planName)) || null;
+
+      await prisma.benefitPlan.create({
+        data: {
+          clientSnapshotId: snapshot.id, planType, carrier, planName,
+          eligible: eligibleCount, enrollees: enrolleeCount, premium,
+          metadata: JSON.stringify(collectAllFields(plan)),
+        },
+      });
+      result.benefitPlansCreated++;
+    }
+
+    for (const emp of employees) {
+      const employeeId = String(
+        extractMapped(emp, "EmployeeGUID", "EmployeeNumber", "ExternalEmployeeId") ||
+        `emp-${result.employeesProcessed}`
+      );
+      const person: any = emp.Person || emp;
+      const firstName = String(extractMapped(person, "FirstName", "firstName") || "");
+      const lastName = String(extractMapped(person, "LastName", "lastName") || "");
+      const dob = extractMapped(person, "DOB", "DateOfBirth", "dateOfBirth");
+      const hireDate = extractMapped(emp, "HireDate", "HiredOn", "OriginalHireDate");
+      const termDate = extractMapped(emp, "TerminationDate", "TerminatedOn", "TermDate");
+      const status = extractMapped(emp, "EmploymentStatus", "Status") || deriveStatus(termDate);
+      const enrollments = findEnrollments(emp);
+      const coverageTier = deriveCoverageTier(enrollments);
+
+      await prisma.employeeSnapshot.create({
+        data: {
+          clientSnapshotId: snapshot.id, employeeId, firstName, lastName,
+          dateOfBirth: dob, hireDate, termDate, status, coverageTier,
+          metadata: JSON.stringify(collectAllFields(emp)),
+        },
+      });
+      result.employeesProcessed++;
+    }
+
+    result.clientsProcessed++;
+  }
+
+  // Cap traces for response size
+  if (result.traces && result.traces.length > 500) {
+    result.traces = result.traces.slice(0, 500);
+  }
+
+  return result;
+}
+
+/**
+ * Legacy import — original hardcoded logic, zero behavior changes.
+ * Used when no active schema version is configured.
+ */
+async function importLegacy(
   xmlContent: string,
   year?: number,
   month?: number
@@ -98,6 +352,7 @@ export async function importAnnualXml(
     clientsUpdated: 0,
     benefitPlansCreated: 0,
     employeesProcessed: 0,
+    importMode: "legacy",
     debugStructure,
     rawPreview,
   };

@@ -8,6 +8,11 @@ import { getExclusionRules, isExcluded } from "@/lib/exclusions";
  *
  * This replaces the expensive per-request processing of employee metadata.
  * Called once after each XML import, results are served instantly from cache.
+ *
+ * Mapping-driven resolution: If an active schema with field mappings exists,
+ * getMappedField() uses mapping fallback chains. Otherwise falls back to
+ * hardcoded getField() calls. Historical data continues to work either way
+ * because metadata stores raw XML field values under their original names.
  */
 
 const PEPM_RATE = 20;
@@ -15,6 +20,59 @@ const COMMISSION_RATE = 0.10;
 const PEPM_CARRIERS = ["EBPA", "HealthEZ"];
 const COMMISSION_CARRIERS = ["Guardian", "VSP"];
 const BATCH_SIZE = 500;
+
+// ─── Active Schema Resolution ───────────────────────────────────────────────
+
+interface ActiveMappingLookup {
+  byFieldName: Map<string, string[]>; // elementName → [primaryField, ...fallbacks]
+}
+
+async function loadActiveMappings(): Promise<ActiveMappingLookup | null> {
+  const activeSchema = await prisma.schemaVersion.findFirst({
+    where: { status: "active" },
+    select: {
+      mappings: {
+        where: { active: true, included: true },
+        select: { xmlPath: true, fallbackFields: true },
+      },
+    },
+  });
+
+  if (!activeSchema || activeSchema.mappings.length === 0) return null;
+
+  const byFieldName = new Map<string, string[]>();
+  for (const m of activeSchema.mappings) {
+    const name = m.xmlPath.split(".").pop() || m.xmlPath;
+    let fallbacks: string[] = [];
+    try { fallbacks = m.fallbackFields ? JSON.parse(m.fallbackFields) : []; } catch { /* */ }
+    byFieldName.set(name, [name, ...fallbacks]);
+  }
+
+  return { byFieldName };
+}
+
+/**
+ * Mapping-aware field resolver. Tries active mapping's fallback chain first,
+ * then falls back to the provided hardcoded keys.
+ * Works for both historical data (hardcoded finds the value) and new data
+ * (mapping chain may resolve to different/new field names).
+ */
+function getMappedField(
+  obj: any,
+  mappings: ActiveMappingLookup | null,
+  primaryField: string,
+  ...hardcodedFallbacks: string[]
+): string | null {
+  if (mappings) {
+    const chain = mappings.byFieldName.get(primaryField);
+    if (chain) {
+      const result = getField(obj, ...chain);
+      if (result) return result;
+    }
+  }
+  // Fall back to hardcoded chain (works for historical data)
+  return getField(obj, primaryField, ...hardcodedFallbacks);
+}
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -613,6 +671,9 @@ function buildBenefitsReport(snapshots: ProcessedSnapshot[]) {
 async function buildProductionDashboard(): Promise<any> {
   const exclusionRules = await getExclusionRules();
 
+  // Load active schema mappings (null if no active schema)
+  const activeMappings = await loadActiveMappings();
+
   // Load carrier settings (includes exclusion flag)
   const carrierSettings = await prisma.carrierSetting.findMany();
   const csMap = new Map<string, { incomeMethod: string; rate: number; excluded: boolean }>();
@@ -661,15 +722,14 @@ async function buildProductionDashboard(): Promise<any> {
       let planMeta: any = {};
       try { planMeta = bp.metadata ? JSON.parse(bp.metadata) : {}; } catch { /* */ }
 
-      const policyNumber = getField(planMeta,
+      const policyNumber = getMappedField(planMeta, activeMappings,
         "PolicyNumber", "GroupPolicyNumber", "GroupNumber",
         "ContractNumber", "PlanNumber", "CertificateNumber",
         "CarrierPlanNumber", "CarrierGroupNumber", "InsurancePolicyNumber"
       ) || "";
 
       const info = { carrier: bp.carrier || "Unspecified", planType: bp.planType || "Unknown", planName: bp.planName || "", policyNumber };
-      // Key by EN internal PlanIdentifier (GUID) for matching employee enrollments
-      const planIdentifier = getField(planMeta, "PlanIdentifier", "PlanId", "PlanID") || "";
+      const planIdentifier = getMappedField(planMeta, activeMappings, "PlanIdentifier", "PlanId", "PlanID") || "";
       if (planIdentifier) planIdMap.set(planIdentifier, info);
       if (bp.planName) planNameMap.set(bp.planName, info);
       hasPlans = true;
@@ -704,8 +764,8 @@ async function buildProductionDashboard(): Promise<any> {
         if (!qualifyEnrollment(enrollment, snapshotMonthStart)) continue;
 
         // Resolve plan from enrollment fields
-        const enrollPlanId = getField(enrollment, "PlanIdentifier", "PlanId", "PlanID") || "";
-        const enrollPlanName = getField(enrollment, "PlanName", "Plan", "Name") || "";
+        const enrollPlanId = getMappedField(enrollment, activeMappings, "PlanIdentifier", "PlanId", "PlanID") || "";
+        const enrollPlanName = getMappedField(enrollment, activeMappings, "PlanName", "Plan", "Name") || "";
         const planKey = enrollPlanId || enrollPlanName;
         if (!planKey) continue;
 
@@ -716,7 +776,7 @@ async function buildProductionDashboard(): Promise<any> {
 
         // CoverageLevel is directly on the Enrollment element.
         // Contains "Employee", "Employee + Family", "30-39", "40-49", etc.
-        const coverageLevel = getField(enrollment, "CoverageLevel") || "Employee";
+        const coverageLevel = getMappedField(enrollment, activeMappings, "CoverageLevel") || "Employee";
 
         const dedupeKey = `${planKey}||${coverageLevel}`;
         if (seen.has(dedupeKey)) continue;
@@ -728,15 +788,15 @@ async function buildProductionDashboard(): Promise<any> {
           return isNaN(v) || v <= 0 ? 0 : v;
         };
 
-        const planCost = parseAmt(getField(enrollment,
+        const planCost = parseAmt(getMappedField(enrollment, activeMappings,
           "PlanCost", "MonthlyPlanCost", "TotalPremium", "Premium",
           "MonthlyPremium", "TotalMonthlyPremium", "Cost"));
 
-        const rate = parseAmt(getField(enrollment,
+        const rate = parseAmt(getMappedField(enrollment, activeMappings,
           "Rate", "EmployeeRate", "MonthlyRate", "PlanRate", "TierRate",
           "PlanCost", "MonthlyPlanCost", "Premium"));
 
-        const benefitAmt = parseAmt(getField(enrollment,
+        const benefitAmt = parseAmt(getMappedField(enrollment, activeMappings,
           "BenefitAmount", "CoverageAmount", "Volume", "Amount",
           "FaceAmount", "BenefitVolume", "ApprovedAmount"));
 
