@@ -227,6 +227,8 @@ function buildProductionReport(snapshots: ProcessedSnapshot[]) {
   let snapshotsProcessed = snapshots.length;
 
   for (const snap of snapshots) {
+    // Skip invalid month-0 snapshots
+    if (snap.month < 1 || snap.month > 12) continue;
     periodsSet.add(`${snap.year}-${String(snap.month).padStart(2, "0")}`);
     clientsSet.add(snap.clientCode);
 
@@ -315,6 +317,8 @@ function buildDashboard(snapshots: ProcessedSnapshot[]) {
 
   let latestYear = 2022;
   for (const snap of snapshots) {
+    // Skip invalid month-0 snapshots
+    if (snap.month < 1 || snap.month > 12) continue;
     if (snap.year > latestYear) latestYear = snap.year;
 
     const key = `${snap.year}-${String(snap.month).padStart(2, "0")}`;
@@ -706,6 +710,8 @@ async function buildProductionDashboard(): Promise<any> {
   // Process each snapshot individually
   for (const snap of snapshotList) {
     if (isExcluded({ groupName: snap.client.groupName }, exclusionRules)) continue;
+    // Skip invalid month-0 snapshots (month not detected during import)
+    if (snap.month < 1 || snap.month > 12) continue;
 
     const period = `${snap.year}-${String(snap.month).padStart(2, "0")}`;
     const snapshotMonthStart = new Date(snap.year, snap.month - 1, 1);
@@ -875,8 +881,8 @@ async function buildProductionDashboard(): Promise<any> {
     }
   }
 
-  const sortedPeriods = Array.from(periodsSet).sort();
-  const fiscalYears = Array.from(new Set(sortedPeriods.map(p => parseInt(p.split("-")[0])))).sort();
+  const sortedPeriods = Array.from(periodsSet).sort().reverse(); // New → old for dropdown
+  const fiscalYears = Array.from(new Set(sortedPeriods.map(p => parseInt(p.split("-")[0])))).sort((a, b) => b - a);
 
   return {
     rows,
