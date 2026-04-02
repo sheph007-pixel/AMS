@@ -21,9 +21,9 @@ export async function POST(
     const audit = await prisma.reportAudit.findUnique({ where: { id } });
     if (!audit) return NextResponse.json({ error: "Audit not found" }, { status: 404 });
 
-    const apiKey = process.env.OPENAI_API_KEY;
+    const apiKey = process.env.OPENAI_API_KEY || process.env.openai;
     if (!apiKey) {
-      return NextResponse.json({ error: "OPENAI_API_KEY not configured" }, { status: 400 });
+      return NextResponse.json({ error: "OPENAI_API_KEY not configured. Set OPENAI_API_KEY or openai env var." }, { status: 400 });
     }
 
     // Build summary for AI review

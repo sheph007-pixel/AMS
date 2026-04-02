@@ -591,13 +591,11 @@ function buildResult(
   const hardFails = checks.filter(c => c.status === "fail" || c.status === "needs_review").length;
 
   // Status determination:
-  // - "verified" = all deterministic + dashboard reconciliation checks pass
-  // - "warning" = only advisory warnings (plan-level cross-check, informational)
+  // - "verified" = no hard failures (fail/needs_review). Warnings are advisory only.
   // - "needs_review" = any fail or dashboard recomputation mismatch
-  // Note: plan-level cross-check is always "warning" and never drives needs_review
+  // Warnings (plan-level cross-check, empty months) do NOT prevent "verified".
   let status: "verified" | "warning" | "needs_review" = "verified";
   if (checks.some(c => c.status === "fail" || c.status === "needs_review")) status = "needs_review";
-  else if (checks.some(c => c.status === "warning")) status = "warning";
 
   return {
     status, checks,
