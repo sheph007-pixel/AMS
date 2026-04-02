@@ -4,84 +4,69 @@ import { prisma } from "@/lib/db";
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 /**
- * TEMPORARY DEBUG: Dump actual enrollment metadata structure
- * to find real field names for age bands, tiers, etc.
- * DELETE THIS AFTER DEBUGGING.
+ * TEMPORARY: Dump all unique field names found at every level of enrollment metadata.
+ * Shows the actual EN XML structure so we can find age band fields.
  */
 export async function GET() {
   try {
-    // Get a recent snapshot
     const snap = await prisma.clientSnapshot.findFirst({
       where: { year: { gte: 2025 } },
       select: { id: true, year: true, month: true, client: { select: { groupName: true } } },
       orderBy: [{ year: "desc" }, { month: "desc" }],
     });
-    if (!snap) return NextResponse.json({ error: "No snapshot found" });
+    if (!snap) return NextResponse.json({ error: "No snapshot" });
 
     const emps = await prisma.employeeSnapshot.findMany({
       where: { clientSnapshotId: snap.id, status: "Active" },
-      select: { firstName: true, metadata: true },
-      take: 2,
+      select: { metadata: true },
+      take: 5,
     });
 
-    const results: any[] = [];
+    // Collect ALL field keys at every level
+    const topLevelKeys = new Set<string>();
+    const enrollmentKeys = new Set<string>();
+    const enrollmentSubObjects: Record<string, Set<string>> = {};
+    const sampleEnrollments: any[] = [];
 
     for (const emp of emps) {
       let meta: any;
       try { meta = JSON.parse(emp.metadata || "{}"); } catch { continue; }
-
       const container = meta.Enrollments || meta.enrollments;
       if (!container) continue;
       const enrollments = container.Enrollment || container.enrollment;
       const list = Array.isArray(enrollments) ? enrollments : enrollments ? [enrollments] : [];
 
-      const enrollmentDumps: any[] = [];
-      for (const e of list.slice(0, 8)) {
-        const dump: any = {};
+      for (const e of list) {
         for (const [k, v] of Object.entries(e)) {
-          if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") {
-            dump[k] = v;
-          } else if (v && typeof v === "object") {
-            // Show nested structure with one level of depth
-            const sub: any = {};
-            for (const [sk, sv] of Object.entries(v as Record<string, any>)) {
-              if (typeof sv === "string" || typeof sv === "number") {
-                sub[sk] = sv;
-              } else if (Array.isArray(sv)) {
-                sub[sk] = sv.slice(0, 2).map((item: any) => {
-                  if (typeof item === "object" && item) {
-                    const flat: any = {};
-                    for (const [ik, iv] of Object.entries(item)) {
-                      if (typeof iv === "string" || typeof iv === "number") flat[ik] = iv;
-                      else if (iv && typeof iv === "object") flat[ik] = `{${Object.keys(iv).join(",")}}`;
-                    }
-                    return flat;
-                  }
-                  return item;
-                });
-              } else if (sv && typeof sv === "object") {
-                sub[sk] = Object.fromEntries(
-                  Object.entries(sv).filter(([, val]) => typeof val === "string" || typeof val === "number")
-                );
+          enrollmentKeys.add(k);
+          if (v && typeof v === "object" && !Array.isArray(v)) {
+            if (!enrollmentSubObjects[k]) enrollmentSubObjects[k] = new Set();
+            for (const sk of Object.keys(v)) enrollmentSubObjects[k].add(sk);
+          }
+          if (Array.isArray(v) && v[0] && typeof v[0] === "object") {
+            if (!enrollmentSubObjects[k]) enrollmentSubObjects[k] = new Set();
+            for (const item of v) {
+              if (typeof item === "object" && item) {
+                for (const sk of Object.keys(item)) enrollmentSubObjects[k].add(sk);
               }
             }
-            dump[k] = sub;
           }
         }
-        enrollmentDumps.push(dump);
+        // Save first 3 full enrollment objects as samples
+        if (sampleEnrollments.length < 6) sampleEnrollments.push(e);
       }
-
-      results.push({
-        employee: emp.firstName,
-        snapshot: `${snap.client.groupName} ${snap.year}-${snap.month}`,
-        enrollmentCount: list.length,
-        enrollments: enrollmentDumps,
-      });
     }
 
-    return NextResponse.json(results, { headers: { "Cache-Control": "no-store" } });
+    return NextResponse.json({
+      snapshot: `${snap.client.groupName} ${snap.year}-${snap.month}`,
+      employeesScanned: emps.length,
+      enrollmentTopLevelKeys: Array.from(enrollmentKeys).sort(),
+      subObjectKeys: Object.fromEntries(
+        Object.entries(enrollmentSubObjects).map(([k, v]) => [k, Array.from(v).sort()])
+      ),
+      sampleEnrollments,
+    }, { headers: { "Cache-Control": "no-store" } });
   } catch (error) {
-    console.error("Debug error:", error);
     return NextResponse.json({ error: String(error) }, { status: 500 });
   }
 }
