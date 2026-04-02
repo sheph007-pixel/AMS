@@ -795,15 +795,12 @@ async function buildProductionDashboard(): Promise<any> {
       if (agg.policyNumber) policyNumbersSet.add(agg.policyNumber);
 
       rows.push({
-        month: period, year: snap.year, monthNum: snap.month,
-        clientName: snap.client.groupName, clientCode: snap.client.groupId,
-        carrier, policyNumber: agg.policyNumber, planName: agg.planName,
-        grouping: agg.grouping, rate: tierRate, lives, benefitAmount,
-        monthlyPremium, incomeMethod, feeRate,
-        feeRateDisplay: incomeMethod === "PEPM" ? `$${feeRate}` : incomeMethod === "PERCENT_PREMIUM" ? `${feeRate}%` : "",
-        income, coverageType: agg.planType,
-        transactionDate: `${snap.year}-${String(snap.month).padStart(2, "0")}-01`,
-        lineOfBusiness: agg.planType, sourceMonth: period,
+        m: period, y: snap.year, mn: snap.month,
+        cn: snap.client.groupName, cc: snap.client.groupId,
+        ca: carrier, pn: agg.policyNumber, pl: agg.planName,
+        g: agg.grouping, r: tierRate, l: lives, ba: benefitAmount,
+        mp: monthlyPremium, im: incomeMethod, fr: feeRate,
+        i: income, ct: agg.planType,
       });
     }
   }
