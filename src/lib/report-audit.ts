@@ -205,11 +205,12 @@ export async function runProductionAudit(reportType: string = "production-dashbo
     expected: 0, actual: excludedInReport.length,
   });
 
-  // Check 10: Exclusion rules enforcement
+  // Check 10: Exclusion rules enforcement (non-carrier rules only — carrier managed by CarrierSetting)
   const exclusionRules = await getExclusionRules();
+  const nonCarrierExclusions = exclusionRules.filter(r => r.field !== "carrier");
   let exclusionViolations = 0;
   for (const r of reportRows) {
-    if (isExcluded({ carrier: r.ca || r.carrier, planName: r.pl || r.planName, planType: r.ct || r.planType }, exclusionRules)) {
+    if (isExcluded({ planName: r.pl || r.planName, planType: r.ct || r.planType }, nonCarrierExclusions)) {
       exclusionViolations++;
     }
   }
@@ -334,6 +335,8 @@ export async function runProductionAudit(reportType: string = "production-dashbo
  */
 async function recomputeDashboard(exclusionRules: { field: string; value: string }[]) {
   const activeMappings = await loadActiveMappings();
+  // Carrier exclusion is managed via CarrierSetting, not ExclusionRule
+  const nonCarrierRules = exclusionRules.filter(r => r.field !== "carrier");
 
   const carrierSettings = await prisma.carrierSetting.findMany();
   const csMap = new Map<string, { incomeMethod: string; rate: number; excluded: boolean }>();
@@ -374,7 +377,7 @@ async function recomputeDashboard(exclusionRules: { field: string; value: string
     let hasPlans = false;
 
     for (const bp of snap.benefitPlans) {
-      if (isExcluded({ carrier: bp.carrier, planName: bp.planName, planType: bp.planType }, exclusionRules)) continue;
+      if (isExcluded({ planName: bp.planName, planType: bp.planType }, nonCarrierRules)) continue;
       if (bp.planType?.toLowerCase() === "cobra") continue;
       if (bp.carrier && csMap.get(bp.carrier.toLowerCase())?.excluded) continue;
 
@@ -522,6 +525,7 @@ async function recomputeDashboard(exclusionRules: { field: string; value: string
 // ─── Plan-Level Cross-Check (INFORMATIONAL) ─────────────────────────────────
 
 async function recomputePlanLevel(exclusionRules: { field: string; value: string }[]) {
+  const nonCarrierRules = exclusionRules.filter(r => r.field !== "carrier");
   const carrierSettings = await prisma.carrierSetting.findMany();
   const csMap = new Map(carrierSettings.map(cs => [
     cs.carrierName.toLowerCase(),
@@ -543,7 +547,7 @@ async function recomputePlanLevel(exclusionRules: { field: string; value: string
   for (const snap of snapshots) {
     if (isExcluded({ groupName: snap.client.groupName }, exclusionRules)) continue;
     for (const bp of snap.benefitPlans) {
-      if (isExcluded({ carrier: bp.carrier, planName: bp.planName, planType: bp.planType }, exclusionRules)) continue;
+      if (isExcluded({ planName: bp.planName, planType: bp.planType }, nonCarrierRules)) continue;
       if (bp.planType?.toLowerCase() === "cobra") continue;
       if (bp.carrier && csMap.get(bp.carrier.toLowerCase())?.excluded) continue;
       rows++;

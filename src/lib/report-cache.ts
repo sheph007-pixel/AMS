@@ -225,6 +225,8 @@ interface ProcessedSnapshot {
  */
 async function processAllSnapshots(): Promise<ProcessedSnapshot[]> {
   const exclusionRules = await getExclusionRules();
+  // Carrier exclusion is managed via CarrierSetting (user UI), not ExclusionRule
+  const nonCarrierRules = exclusionRules.filter(r => r.field !== "carrier");
 
   const snapshotList = await prisma.clientSnapshot.findMany({
     where: { year: { gte: 2022 } },
@@ -246,7 +248,7 @@ async function processAllSnapshots(): Promise<ProcessedSnapshot[]> {
     const agg = new Map<string, AggEntry>();
 
     for (const bp of snap.benefitPlans) {
-      if (isExcluded({ carrier: bp.carrier, planName: bp.planName, planType: bp.planType }, exclusionRules)) continue;
+      if (isExcluded({ planName: bp.planName, planType: bp.planType }, nonCarrierRules)) continue;
       // Explicit COBRA exclusion — matches dashboard behavior
       if (bp.planType?.toLowerCase() === "cobra") continue;
 
@@ -741,6 +743,9 @@ function buildBenefitsReport(snapshots: ProcessedSnapshot[]) {
  */
 async function buildProductionDashboard(): Promise<any> {
   const exclusionRules = await getExclusionRules();
+  // Carrier exclusion is handled by CarrierSetting.excluded (user-managed UI toggle).
+  // Filter out carrier-field ExclusionRules so they don't override CarrierSetting.
+  const nonCarrierRules = exclusionRules.filter(r => r.field !== "carrier");
 
   // Load active schema mappings (null if no active schema)
   const activeMappings = await loadActiveMappings();
@@ -787,9 +792,9 @@ async function buildProductionDashboard(): Promise<any> {
     let hasPlans = false;
 
     for (const bp of snap.benefitPlans) {
-      if (isExcluded({ carrier: bp.carrier, planName: bp.planName, planType: bp.planType }, exclusionRules)) continue;
+      if (isExcluded({ planName: bp.planName, planType: bp.planType }, nonCarrierRules)) continue;
       if (bp.planType?.toLowerCase() === "cobra") continue;
-      // Check carrier exclusion from CarrierSetting
+      // Carrier exclusion from CarrierSetting (single source of truth for carriers)
       if (bp.carrier && csMap.get(bp.carrier.toLowerCase())?.excluded) continue;
 
       let planMeta: any = {};

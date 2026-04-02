@@ -3,15 +3,14 @@ import { PrismaClient } from "@prisma/client";
 const prisma = new PrismaClient();
 
 async function main() {
-  // Seed default exclusion rules
-  await prisma.exclusionRule.upsert({
-    where: { field_value: { field: "carrier", value: "Blue Cross Blue Shield of Alabama" } },
-    update: {},
-    create: {
-      field: "carrier",
-      value: "Blue Cross Blue Shield of Alabama",
-      description: "Excluded carrier — do not include in any imports",
-    },
+  // NOTE: Carrier exclusions are managed via CarrierSetting.excluded (UI toggle).
+  // ExclusionRule is only for non-carrier rules (planType, planName patterns).
+  // No carrier-level ExclusionRule entries should be seeded — they conflict with
+  // the user's CarrierSetting choices.
+
+  // Clean up legacy carrier exclusion rules that conflict with CarrierSetting
+  await prisma.exclusionRule.deleteMany({
+    where: { field: "carrier" },
   });
 
   // Seed default carrier settings
