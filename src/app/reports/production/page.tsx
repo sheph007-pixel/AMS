@@ -91,11 +91,14 @@ const CSV_HEADERS = [
   "Year", "Month", "Transaction Date", "Client Name", "Client Code", "SIC Code", "State",
   "Insurance Carrier", "Line of Business", "Plan Name", "Coverage Type",
   "Eligible Employees", "Enrolled Employees", "Monthly Premium",
-  "Fee Type", "Rate", "Agency Commission", "Annual Agency Commission",
+  "Fee Type", "Rate", "Est. Monthly Income", "Est. Annual Income",
   "Agency Code", "Bill Type", "Producer", "Broker", "Department",
 ];
 
+const INCOME_DISCLAIMER = "Estimated Income is derived from enrollment and rate data and may not reconcile to accounting systems due to timing differences and external revenue sources.";
+
 function toCSV(rows: ProductionRow[]): string {
+  const disclaimer = `"${INCOME_DISCLAIMER}"`;
   const header = CSV_HEADERS.map(h => `"${h}"`).join(",");
   const lines = rows.map(r =>
     [
@@ -110,7 +113,7 @@ function toCSV(rows: ProductionRow[]): string {
       `"${r.agencyCode}"`, `"${r.billType}"`, `"${r.producer}"`, `"${r.broker}"`, `"${r.department}"`,
     ].join(",")
   );
-  return [header, ...lines].join("\n");
+  return [disclaimer, "", header, ...lines].join("\n");
 }
 
 function toExcelXML(rows: ProductionRow[], summary: Summary | null, methodology: Methodology | null, audit: AuditInfo | null): string {
@@ -159,7 +162,10 @@ function toExcelXML(rows: ProductionRow[], summary: Summary | null, methodology:
     xml += `<Row>${cell("  Carriers not in either category: No estimated fee (actual fees tracked in financial statements)")}</Row>`;
   }
   xml += blankRow();
-  xml += `<Row>${cell("RECONCILIATION NOTE", "SectionHead")}</Row>`;
+  xml += `<Row>${cell("INCOME DISCLAIMER", "SectionHead")}</Row>`;
+  xml += blankRow();
+  xml += `<Row>${cell("Estimated Income is derived from enrollment and rate data and may not reconcile to accounting")}</Row>`;
+  xml += `<Row>${cell("systems due to timing differences and external revenue sources.")}</Row>`;
   xml += blankRow();
   xml += `<Row>${cell("Actual collected revenue is recorded in Kennion/NIA financial statements and may differ from estimated")}</Row>`;
   xml += `<Row>${cell("fees shown here due to timing, retroactive adjustments, mid-month enrollment changes, and carrier payment cycles.")}</Row>`;
@@ -198,8 +204,8 @@ function toExcelXML(rows: ProductionRow[], summary: Summary | null, methodology:
     ["Monthly Premium", "Total monthly premium billed", "Sum of PlanCost"],
     ["Fee Type", "PEPM or Commission", "Carrier classification"],
     ["Rate", "Fee rate applied", "Standard fee schedule"],
-    ["Agency Commission", "Monthly agency commission or fee income", "PEPM rate x enrolled, or premium x commission rate"],
-    ["Annual Agency Commission", "Agency commission x 12", "Annualized"],
+    ["Est. Monthly Income", "Estimated monthly income from enrollment and rate data", "Enrolled x PEPM rate, or premium x commission rate"],
+    ["Est. Annual Income", "Estimated annual income (monthly x 12)", "Annualized"],
     ["Agency Code", "Agency identifier", "KENNION"],
     ["Bill Type", "Billing method", "Direct"],
     ["Producer", "Producing agent", "Kennion Benefits"],
@@ -259,7 +265,7 @@ function toExcelXML(rows: ProductionRow[], summary: Summary | null, methodology:
   }
 
   xml += `<Worksheet ss:Name="Summary by Year"><Table>`;
-  xml += `<Row>${cell("Fiscal Year", "Bold")}${cell("Clients", "Bold")}${cell("Detail Rows", "Bold")}${cell("Total Enrolled", "Bold")}${cell("Total Premium", "Bold")}${cell("Agency Commission", "Bold")}${cell("Effective Margin", "Bold")}</Row>`;
+  xml += `<Row>${cell("Fiscal Year", "Bold")}${cell("Clients", "Bold")}${cell("Detail Rows", "Bold")}${cell("Total Enrolled", "Bold")}${cell("Total Premium", "Bold")}${cell("Estimated Income", "Bold")}${cell("Effective Margin", "Bold")}</Row>`;
   let grandPremium = 0, grandFee = 0;
   for (const [year, data] of Array.from(yearMap.entries()).sort((a, b) => a[0] - b[0])) {
     const margin = data.premium > 0 ? data.estFee / data.premium : 0;
@@ -283,7 +289,7 @@ function toExcelXML(rows: ProductionRow[], summary: Summary | null, methodology:
   }
 
   xml += `<Worksheet ss:Name="Summary by Carrier"><Table>`;
-  xml += `<Row>${cell("Insurance Carrier", "Bold")}${cell("Clients", "Bold")}${cell("Detail Rows", "Bold")}${cell("Total Enrolled", "Bold")}${cell("Total Premium", "Bold")}${cell("Agency Commission", "Bold")}${cell("Fee Type", "Bold")}</Row>`;
+  xml += `<Row>${cell("Insurance Carrier", "Bold")}${cell("Clients", "Bold")}${cell("Detail Rows", "Bold")}${cell("Total Enrolled", "Bold")}${cell("Total Premium", "Bold")}${cell("Estimated Income", "Bold")}${cell("Fee Type", "Bold")}</Row>`;
   for (const [carrier, data] of Array.from(carrierMap.entries()).sort((a, b) => b[1].premium - a[1].premium)) {
     const isPEPM = PEPM_CARRIERS.some(c => carrier.toLowerCase().includes(c.toLowerCase()));
     const isComm = COMMISSION_CARRIERS.some(c => carrier.toLowerCase().includes(c.toLowerCase()));
@@ -306,7 +312,7 @@ function toExcelXML(rows: ProductionRow[], summary: Summary | null, methodology:
   }
 
   xml += `<Worksheet ss:Name="Summary by Client"><Table>`;
-  xml += `<Row>${cell("Client Name", "Bold")}${cell("Client Code", "Bold")}${cell("Carriers", "Bold")}${cell("Detail Rows", "Bold")}${cell("Total Enrolled", "Bold")}${cell("Total Premium", "Bold")}${cell("Agency Commission", "Bold")}${cell("Annual Commission", "Bold")}</Row>`;
+  xml += `<Row>${cell("Client Name", "Bold")}${cell("Client Code", "Bold")}${cell("Carriers", "Bold")}${cell("Detail Rows", "Bold")}${cell("Total Enrolled", "Bold")}${cell("Total Premium", "Bold")}${cell("Est. Monthly Income", "Bold")}${cell("Est. Annual Income", "Bold")}</Row>`;
   for (const [name, data] of Array.from(clientMap.entries()).sort((a, b) => b[1].premium - a[1].premium)) {
     xml += `<Row>${cell(name)}${cell(data.code)}${numCell(data.carriers.size)}${numCell(data.rows)}${numCell(data.enrolled)}${numCell(Math.round(data.premium * 100) / 100, "Currency")}${numCell(Math.round(data.estFee * 100) / 100, "Currency")}${numCell(Math.round(data.estFee * 12 * 100) / 100, "Currency")}</Row>`;
   }
@@ -574,7 +580,7 @@ export default function ProductionReportPage() {
             <p className="text-2xl font-bold text-bob-text mt-1">{formatCurrency(summary.totalPremium)}</p>
           </div>
           <div className="bg-white rounded-xl border border-bob-border p-4">
-            <p className="text-xs font-medium text-bob-text-soft uppercase tracking-wide">Agency Commission</p>
+            <p className="text-xs font-medium text-bob-text-soft uppercase tracking-wide">Estimated Income</p>
             <p className="text-2xl font-bold text-bob-green mt-1">{formatCurrency(summary.totalEstIncome)}</p>
           </div>
         </div>
@@ -632,7 +638,7 @@ export default function ProductionReportPage() {
         Showing {filtered.length.toLocaleString()} of {rows.length.toLocaleString()} rows
         {yearFilter !== "all" && ` for ${yearFilter === "2022-2025" ? "FY 2022–2025" : yearFilter}`}
         {search && ` matching "${search}"`}
-        {" | "}Premium: {formatCurrency(filteredTotals.premium)} | Commission: {formatCurrency(filteredTotals.estIncome)}
+        {" | "}Premium: {formatCurrency(filteredTotals.premium)} | Est. Income: {formatCurrency(filteredTotals.estIncome)}
       </div>
 
       {/* Data Table */}
@@ -652,7 +658,7 @@ export default function ProductionReportPage() {
                   ["enrolled", "Enrolled"],
                   ["monthlyPremium", "Premium"],
                   ["feeType", "Fee Type"],
-                  ["estMonthlyFee", "Commission"],
+                  ["estMonthlyFee", "Est. Income"],
                 ] as [SortKey, string][]).map(([key, label]) => (
                   <th
                     key={key}
@@ -876,8 +882,8 @@ export default function ProductionReportPage() {
                   ["Monthly Premium", "Total monthly premium billed", "Sum of PlanCost from enrollment records"],
                   ["Fee Type", "PEPM or Commission (if applicable)", "Based on carrier classification"],
                   ["Rate", "Fee rate applied ($20 PEPM or 10%)", "Standard fee schedule"],
-                  ["Est. Monthly Commission/Fee", "Estimated monthly fee income", "Enrolled x PEPM rate, or Premium x Commission %"],
-                  ["Est. Annual Commission/Fee", "Estimated annual fee income", "Monthly fee x 12"],
+                  ["Est. Monthly Income", "Estimated monthly income from enrollment and rate data", "Enrolled x PEPM rate, or Premium x Commission %"],
+                  ["Est. Annual Income", "Estimated annual income (monthly x 12)", "Monthly income x 12"],
                   ["Agency Code", "Agency identifier", "KENNION (single agency)"],
                   ["Bill Type", "How the client is billed", "Direct (billed through Employee Navigator)"],
                   ["Producer", "Producing broker/agent", "Kennion Benefits (house account)"],

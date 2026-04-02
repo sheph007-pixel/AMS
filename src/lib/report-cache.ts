@@ -236,6 +236,8 @@ function buildProductionReport(snapshots: ProcessedSnapshot[]) {
       const isPEPM = PEPM_CARRIERS.some(c => entry.carrier.toLowerCase().includes(c.toLowerCase()));
       const isComm = COMMISSION_CARRIERS.some(c => entry.carrier.toLowerCase().includes(c.toLowerCase()));
 
+      // Estimated Income is calculated from enrollment-derived premium and carrier settings.
+      // PEPM: enrolled x rate. Commission: premium x rate. This is an operational estimate.
       let feeType = "", rate = "", estMonthlyFee = 0;
       if (isPEPM) { feeType = "PEPM"; rate = `$${PEPM_RATE} PEPM`; estMonthlyFee = enrolled * PEPM_RATE; }
       else if (isComm) { feeType = "Commission"; rate = `${COMMISSION_RATE * 100}%`; estMonthlyFee = premium * COMMISSION_RATE; }
@@ -733,6 +735,11 @@ async function buildProductionDashboard(): Promise<any> {
       if (planIdentifier) planIdMap.set(planIdentifier, info);
       if (bp.planName) planNameMap.set(bp.planName, info);
       hasPlans = true;
+
+      // Register carrier in filters even before enrollment matching —
+      // ensures all non-excluded carriers with plan data show in the dropdown
+      carriersSet.add(info.carrier);
+      if (info.planType) coverageTypesSet.add(info.planType);
     }
 
     if (!hasPlans) continue;
@@ -839,6 +846,9 @@ async function buildProductionDashboard(): Promise<any> {
       const lives = agg.lives;
       const carrier = agg.carrier;
 
+      // Estimated Income is calculated from enrollment-derived premium and carrier settings.
+      // PEPM: lives x configured rate. PERCENT_PREMIUM: premium x configured rate.
+      // This is an operational estimate and may not reconcile to accounting systems.
       const setting = csMap.get(carrier.toLowerCase());
       let incomeMethod = "NONE", feeRate = 0, income = 0;
       if (setting) {

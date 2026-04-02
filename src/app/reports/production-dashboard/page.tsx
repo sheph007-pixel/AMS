@@ -108,11 +108,14 @@ function escCsv(s: string | number): string {
 const EXPORT_HEADERS = [
   "Transaction Date", "Month", "Client Name", "Client Code", "Insurance Carrier",
   "Policy Number", "Plan Name", "Grouping", "Rate", "Lives", "Benefit Amount",
-  "Monthly Premium", "Income Method", "Configured Rate", "Income",
+  "Monthly Premium", "Income Method", "Configured Rate", "Estimated Income",
   "Coverage Type", "Line of Business", "Source Month",
 ];
 
+const INCOME_DISCLAIMER = "Estimated Income is derived from enrollment and rate data and may not reconcile to accounting systems due to timing differences and external revenue sources.";
+
 function rowsToCSV(rows: Row[]): string {
+  const disclaimer = `"${INCOME_DISCLAIMER}"`;
   const header = EXPORT_HEADERS.map(h => escCsv(h)).join(",");
   const lines = rows.map(r => [
     r.transactionDate, r.month, escCsv(r.clientName), escCsv(r.clientCode),
@@ -121,7 +124,7 @@ function rowsToCSV(rows: Row[]): string {
     r.monthlyPremium.toFixed(2), r.incomeMethod, r.feeRate, r.income.toFixed(2),
     escCsv(r.coverageType), escCsv(r.lineOfBusiness), r.sourceMonth,
   ].join(","));
-  return [header, ...lines].join("\n");
+  return [disclaimer, "", header, ...lines].join("\n");
 }
 
 function rowsToExcelXML(rows: Row[]): string {
@@ -136,6 +139,9 @@ function rowsToExcelXML(rows: Row[]): string {
 </Styles>
 <Worksheet ss:Name="Production Detail">
 <Table>`;
+  // Disclaimer row
+  xml += `<Row><Cell><Data ss:Type="String">${esc(INCOME_DISCLAIMER)}</Data></Cell></Row>`;
+  xml += "<Row></Row>";
   xml += "<Row>";
   EXPORT_HEADERS.forEach(h => { xml += `<Cell ss:StyleID="B"><Data ss:Type="String">${esc(h)}</Data></Cell>`; });
   xml += "</Row>";
@@ -471,7 +477,7 @@ export default function ProductionDashboardPage() {
     { key: "lives", label: "Lives", align: "text-right" },
     { key: "benefitAmount", label: "Benefit Amt", align: "text-right" },
     { key: "monthlyPremium", label: "Premium", align: "text-right" },
-    { key: "income", label: "Income", align: "text-right" },
+    { key: "income", label: "Est. Income", align: "text-right" },
   ];
 
   return (
@@ -490,7 +496,7 @@ export default function ProductionDashboardPage() {
             { label: `${hasFilters ? "Filtered" : "Total"} Rows`, value: filteredSummary.rows.toLocaleString(), color: "text-bob-text" },
             { label: `${hasFilters ? "Filtered" : "Total"} Lives`, value: filteredSummary.lives.toLocaleString(), color: "text-bob-text" },
             { label: `${hasFilters ? "Filtered" : "Total"} Premium`, value: fmtCurrency(filteredSummary.premium), color: "text-bob-text" },
-            { label: `${hasFilters ? "Filtered" : "Total"} Income`, value: fmtCurrency(filteredSummary.income), color: "text-bob-purple" },
+            { label: `${hasFilters ? "Filtered" : "Total"} Est. Income`, value: fmtCurrency(filteredSummary.income), color: "text-bob-purple" },
           ].map(card => (
             <div key={card.label} className="bg-white rounded-2xl border border-bob-border p-4">
               <div className="text-[10px] text-bob-text-soft uppercase tracking-wider mb-1">{card.label}</div>
