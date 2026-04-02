@@ -200,6 +200,155 @@ model CarrierSetting {
   updatedAt DateTime @updatedAt
 }
 
+// ─── Schema Management ──────────────────────────────────────────────────────
+
+/// Uploaded XSD schema file with versioning. Never overwritten.
+model SchemaVersion {
+  id         String   @id @default(cuid())
+  name       String   /// Human label, e.g. "EN BDX v2.1"
+  version    String   /// Version label, e.g. "2.1", "inferred-1"
+  status     String   @default("inactive") /// "active", "inactive", "archived"
+  xsdContent String   /// Raw XSD file content
+  notes      String?
+  uploadedBy String   @default("admin")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  fields      SchemaField[]
+  mappings    FieldMapping[]
+  testResults SchemaTestResult[]
+
+  @@unique([name, version])
+  @@index([status])
+}
+
+/// Parsed field from an XSD schema. One row per element/attribute.
+model SchemaField {
+  id              String  @id @default(cuid())
+  schemaVersionId String
+
+  xmlPath     String  /// Full dot-path: "Data.Companies.Company.Plans.Plan.PlanCost"
+  elementName String  /// Leaf name: "PlanCost"
+  xmlType     String  /// XSD type: "xs:string", "xs:decimal", "xs:date", etc.
+  isRequired  Boolean @default(false)
+  isRepeating Boolean @default(false) /// maxOccurs > 1
+  isNillable  Boolean @default(false)
+  isAttribute Boolean @default(false) /// true if XSD attribute vs element
+  parentPath  String? /// Parent element path for tree rendering
+  depth       Int     @default(0) /// Nesting depth
+  sortOrder   Int     @default(0)
+
+  schemaVersion SchemaVersion @relation(fields: [schemaVersionId], references: [id], onDelete: Cascade)
+  mappings      FieldMapping[]
+
+  @@unique([schemaVersionId, xmlPath])
+  @@index([schemaVersionId])
+}
+
+/// Admin-configured mapping from an XML field path to a DB/report target.
+/// Keyed by xmlPath. schemaFieldId is optional (XML can have fields not in XSD).
+model FieldMapping {
+  id              String  @id @default(cuid())
+  schemaVersionId String
+  schemaFieldId   String? /// Optional link to SchemaField (null for discovered-only fields)
+  xmlPath         String  /// The XML dot-path this mapping applies to
+
+  included       Boolean @default(true) /// false = explicitly excluded
+  targetModel    String? /// "Client", "BenefitPlan", "EmployeeSnapshot", etc.
+  targetColumn   String? /// DB column name
+  reportingName  String? /// Display name in reports
+  targetType     String? /// "string", "number", "date", "boolean"
+  transformRule  String? /// Transform expression or preset key
+  fallbackFields String? /// JSON array of free-form xmlPath strings
+  notes          String?
+  active         Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  schemaVersion SchemaVersion @relation(fields: [schemaVersionId], references: [id], onDelete: Cascade)
+  schemaField   SchemaField?  @relation(fields: [schemaFieldId], references: [id], onDelete: SetNull)
+  auditEntries  MappingAudit[]
+
+  @@unique([schemaVersionId, xmlPath])
+  @@index([schemaVersionId])
+  @@index([targetModel, targetColumn])
+}
+
+/// Audit log for every mapping change.
+model MappingAudit {
+  id             String   @id @default(cuid())
+  fieldMappingId String
+  action         String   /// "created", "updated", "deleted"
+  changedBy      String   @default("admin")
+  changedField   String?
+  oldValue       String?
+  newValue       String?
+
+  createdAt DateTime @default(now())
+
+  fieldMapping FieldMapping @relation(fields: [fieldMappingId], references: [id], onDelete: Cascade)
+
+  @@index([fieldMappingId])
+  @@index([createdAt])
+}
+
+/// Business validation rules (separate from XSD structural validation).
+model ValidationRule {
+  id         String  @id @default(cuid())
+  name       String  @unique /// "valid-hire-date", "premium-positive", etc.
+  category   String  /// "date", "enrollment", "premium", "carrier", "identity"
+  expression String  /// Rule logic as JSON
+  severity   String  @default("warning") /// "error", "warning", "info"
+  enabled    Boolean @default(true)
+  description String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+/// Fields discovered in XML during test runs or imports (not in XSD).
+model DiscoveredField {
+  id              String   @id @default(cuid())
+  xmlPath         String
+  schemaVersionId String?  /// Null if discovered without any active schema
+  firstSeenAt     DateTime @default(now())
+  lastSeenAt      DateTime @default(now())
+  seenInTest      Boolean  @default(false)
+  seenInImport    Boolean  @default(false)
+  sampleValue     String?  /// First non-null value seen (for type inference)
+
+  @@unique([xmlPath, schemaVersionId])
+  @@index([schemaVersionId])
+}
+
+/// Results from test file validation runs. Coverage counts persisted at test time.
+model SchemaTestResult {
+  id              String @id @default(cuid())
+  schemaVersionId String
+  fileName        String
+  fileSize        Int
+  status          String /// "pass", "fail", "warnings"
+
+  /// Coverage metrics (persisted snapshot — not recomputed from mappings)
+  totalDiscoveredFields Int @default(0) /// Total unique XML paths found at runtime
+  mappedFields          Int @default(0) /// Discovered fields that have a FieldMapping
+  unmappedFields        Int @default(0) /// Discovered fields with NO mapping (mapped + unmapped == total)
+  includedFields        Int @default(0) /// Mapped fields where included = true
+  excludedFields        Int @default(0) /// Mapped fields where included = false (included + excluded == mapped)
+
+  errors         String? /// JSON array of error objects
+  warnings       String? /// JSON array of warning objects
+  parsedPreview  String? /// JSON: per-field detail [{xmlPath, mappingStatus, targetColumn, value, sourceUsed}]
+
+  createdAt DateTime @default(now())
+
+  schemaVersion SchemaVersion @relation(fields: [schemaVersionId], references: [id], onDelete: Cascade)
+
+  @@index([schemaVersionId])
+}
+
 // ─── Report Cache ───────────────────────────────────────────────────────────
 
 /// Pre-computed report data. Rebuilt after each import.
