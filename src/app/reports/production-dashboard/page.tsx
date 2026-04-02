@@ -137,7 +137,7 @@ function rowsToExcelXML(rows: Row[]): string {
  <Style ss:ID="C"><NumberFormat ss:Format="$#,##0.00"/></Style>
  <Style ss:ID="R"><NumberFormat ss:Format="#,##0.000"/></Style>
 </Styles>
-<Worksheet ss:Name="Production Detail">
+<Worksheet ss:Name="Monthly Snapshot Detail">
 <Table>`;
   // Disclaimer row
   xml += `<Row><Cell><Data ss:Type="String">${esc(INCOME_DISCLAIMER)}</Data></Cell></Row>`;
@@ -485,7 +485,7 @@ export default function ProductionDashboardPage() {
       <div className="mb-6">
         <h1 className="text-3xl font-bold tracking-tight text-bob-text">Production Report</h1>
         <p className="text-bob-text-soft mt-1">
-          Monthly production by group and coverage tier with carrier billing income — 2022 to current
+          Monthly snapshot enrollment detail by plan and coverage tier — point-in-time counts, not unique annual lives
         </p>
       </div>
 

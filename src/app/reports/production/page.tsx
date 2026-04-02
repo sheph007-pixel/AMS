@@ -134,7 +134,8 @@ function toExcelXML(rows: ProductionRow[], summary: Summary | null, methodology:
   // ─── Tab 1: Cover Sheet ─────────────────────────────────────────────
   xml += `<Worksheet ss:Name="Cover Sheet"><Table>`;
   xml += `<Row>${cell("KENNION / NIA — PRODUCTION REPORT", "Title")}</Row>`;
-  xml += `<Row>${cell("Fiscal Years 2022–2025")}</Row>`;
+  xml += `<Row>${cell("Monthly Snapshot Enrollment Detail — Fiscal Years 2022–2025")}</Row>`;
+  xml += `<Row>${cell("Point-in-time enrollment counts per plan and coverage tier. Not unique annual lives.")}</Row>`;
   xml += blankRow();
   xml += `<Row>${cell("Report Generated:", "Bold")}${cell(new Date().toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric", hour: "2-digit", minute: "2-digit" }))}</Row>`;
   xml += `<Row>${cell("Prepared For:", "Bold")}${cell("Reagan Consulting")}</Row>`;
@@ -205,8 +206,8 @@ function toExcelXML(rows: ProductionRow[], summary: Summary | null, methodology:
   }
   xml += `</Table></Worksheet>`;
 
-  // ─── Tab 2: Production Data ─────────────────────────────────────────
-  xml += `<Worksheet ss:Name="Production Data"><Table>`;
+  // ─── Tab 2: Monthly Snapshot Detail ─────────────────────────────────
+  xml += `<Worksheet ss:Name="Monthly Snapshot Detail"><Table>`;
   xml += "<Row>";
   CSV_HEADERS.forEach(h => { xml += `<Cell ss:StyleID="Bold"><Data ss:Type="String">${esc(h)}</Data></Cell>`; });
   xml += "</Row>";
@@ -534,7 +535,7 @@ export default function ProductionReportPage() {
         </a>
         <h1 className="text-3xl font-bold tracking-tight text-bob-text">Production Report</h1>
         <p className="text-bob-text-soft mt-1">
-          Full production report detail — all carriers, clients, premiums, and agency commissions | Fiscal Years 2022–2025
+          Monthly snapshot enrollment detail — point-in-time counts per plan and coverage tier, not unique annual lives
         </p>
       </div>
 

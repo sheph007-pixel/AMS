@@ -95,14 +95,51 @@ function getField(obj: any, ...keys: string[]): string | null {
   return null;
 }
 
+/**
+ * Monthly Snapshot Enrollment Qualification.
+ *
+ * Include only enrollments where:
+ * - EnrollmentType is "Current" (if field exists), OR no decline reason (if field absent)
+ * - Not declined/cancelled/termed (explicit status check)
+ * - Effective/start date <= snapshot date (if present)
+ * - Coverage end date is null or > snapshot date
+ * - Not COBRA (checked separately at plan level, but also here for enrollment-level COBRA)
+ *
+ * This is a point-in-time active enrollment check for the snapshot month.
+ */
 function qualifyEnrollment(enrollment: any, snapshotMonthStart?: Date): boolean {
+  // Explicit type check — reject declined, cancelled, termed, waived
   const enrollmentType = getField(enrollment, "EnrollmentType", "enrollmentType", "Type");
-  if (enrollmentType) return enrollmentType.toLowerCase() === "current";
+  if (enrollmentType) {
+    const t = enrollmentType.toLowerCase();
+    if (t !== "current" && t !== "active" && t !== "enrolled") return false;
+  }
+
+  // Reject if decline reason is present
   const declineReason = getField(enrollment, "DeclineReason", "declineReason");
-  const endDate = getField(enrollment, "CoverageEndDate", "EndDate", "EndedOn");
+  if (declineReason) return false;
+
+  // Reject enrollment-level COBRA
+  const cobraFlag = getField(enrollment, "COBRAStatus", "IsCOBRA", "CobraIndicator");
+  if (cobraFlag && cobraFlag.toLowerCase() !== "false" && cobraFlag !== "0") return false;
+
   const compareDate = snapshotMonthStart || new Date();
-  const isEnded = endDate && new Date(endDate) < compareDate;
-  return !declineReason && !isEnded;
+
+  // Effective date must be <= snapshot date (if present)
+  const startDate = getField(enrollment, "CoverageStartDate", "EffectiveDate", "CoverageBeginDate", "StartDate");
+  if (startDate) {
+    const start = new Date(startDate);
+    if (!isNaN(start.getTime()) && start > compareDate) return false;
+  }
+
+  // Coverage end date must be null or > snapshot date
+  const endDate = getField(enrollment, "CoverageEndDate", "EndDate", "EndedOn", "TerminationDate");
+  if (endDate) {
+    const end = new Date(endDate);
+    if (!isNaN(end.getTime()) && end < compareDate) return false;
+  }
+
+  return true;
 }
 
 function resolvePlan(
@@ -753,10 +790,19 @@ async function buildProductionDashboard(): Promise<any> {
     // Load employees for THIS snapshot only (memory-safe batch)
     const employees = await prisma.employeeSnapshot.findMany({
       where: { clientSnapshotId: snap.id },
-      select: { status: true, metadata: true },
+      select: { employeeId: true, status: true, metadata: true },
     });
 
-    // Aggregate by plan + tier
+    // ── Monthly Snapshot Enrollment Aggregation ──
+    // This is a point-in-time snapshot: each month is independent.
+    // The same employee appearing in Jan and Feb is two separate monthly counts.
+    // We do NOT deduplicate across months — multi-month totals reflect enrollment-months.
+    //
+    // Within a single monthly snapshot, dedupe on:
+    //   employee (outer loop) + plan + coverage tier (dedupeKey)
+    // This prevents double-counting if the same employee has duplicate enrollment
+    // records for the same plan+tier within one month.
+
     const tierAgg = new Map<string, {
       carrier: string; planType: string; planName: string; policyNumber: string;
       grouping: string; rates: number[]; benefitAmounts: number[];
@@ -764,6 +810,7 @@ async function buildProductionDashboard(): Promise<any> {
     }>();
 
     for (const emp of employees) {
+      // Exclude termed employees — only active employees in this snapshot
       if ((emp.status || "Active").toLowerCase() !== "active") continue;
 
       let empMeta: any;
@@ -771,9 +818,12 @@ async function buildProductionDashboard(): Promise<any> {
       if (!empMeta) continue;
 
       const enrollments = findEnrollments(empMeta);
+      // Per-employee dedupe set: prevents counting same employee twice
+      // for the same plan+tier within this monthly snapshot
       const seen = new Set<string>();
 
       for (const enrollment of enrollments) {
+        // Active enrollment filter: checks type, decline, COBRA, effective date, end date
         if (!qualifyEnrollment(enrollment, snapshotMonthStart)) continue;
 
         // Resolve plan from enrollment fields
@@ -787,10 +837,10 @@ async function buildProductionDashboard(): Promise<any> {
           || null;
         if (!planInfo) continue;
 
-        // CoverageLevel is directly on the Enrollment element.
-        // Contains "Employee", "Employee + Family", "30-39", "40-49", etc.
+        // CoverageLevel / Grouping from enrollment
         const coverageLevel = getMappedField(enrollment, activeMappings, "CoverageLevel") || "Employee";
 
+        // Dedupe: employee + plan + tier within this monthly snapshot
         const dedupeKey = `${planKey}||${coverageLevel}`;
         if (seen.has(dedupeKey)) continue;
         seen.add(dedupeKey);
