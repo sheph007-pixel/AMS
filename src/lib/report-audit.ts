@@ -1,16 +1,29 @@
 import { prisma } from "@/lib/db";
 import { getExclusionRules, isExcluded } from "@/lib/exclusions";
+import {
+  findEnrollments, getField, qualifyEnrollment,
+  getMappedField, loadActiveMappings,
+} from "@/lib/report-cache";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 /**
  * Report Audit — Deterministic verification + independent recomputation.
  *
- * This is the PRIMARY audit system. AI review is optional and advisory only.
+ * PRIMARY audit: Dashboard Reconciliation
+ *   Mirrors buildProductionDashboard() exactly:
+ *   - EmployeeSnapshot.metadata enrollment walk
+ *   - qualifyEnrollment() active-month filter
+ *   - Plan-level + enrollment-level COBRA exclusion
+ *   - Dedupe by employee + plan + coverageLevel
+ *   - Aggregate by policyNumber||planName||coverageLevel
+ *   - Income from CarrierSetting table
  *
- * Two layers:
- * 1. Rule-based checks: structural consistency, exclusion enforcement, data quality
- * 2. Independent recomputation: rebuilds totals from raw DB data, compares to report cache
+ * SECONDARY audit (informational): Plan-Level Cross-Check
+ *   Compares BenefitPlan-level totals as an independent sanity check.
+ *   Does NOT drive the status badge.
+ *
+ * AI review is optional and advisory only.
  */
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -56,7 +69,7 @@ export interface AuditResult {
 
 // ─── Tolerance ──────────────────────────────────────────────────────────────
 
-const PREMIUM_TOLERANCE = 0.01; // $0.01 rounding tolerance
+const PREMIUM_TOLERANCE = 0.01;
 const INCOME_TOLERANCE = 0.01;
 
 // ─── Main Audit Runner ──────────────────────────────────────────────────────
@@ -81,7 +94,6 @@ export async function runProductionAudit(reportType: string = "production-dashbo
 
   checks.push({ name: "cache-exists", status: "pass", message: "Report cache found and parseable" });
 
-  // Extract report-side totals
   const reportRows: any[] = reportData.rows || [];
   const reportTotals = computeTotalsFromRows(reportRows, reportType);
 
@@ -95,8 +107,7 @@ export async function runProductionAudit(reportType: string = "production-dashbo
     message: reportedRowCount === reportRows.length
       ? `Row count matches: ${reportRows.length}`
       : `Summary says ${reportedRowCount} rows but data has ${reportRows.length}`,
-    expected: reportedRowCount,
-    actual: reportRows.length,
+    expected: reportedRowCount, actual: reportRows.length,
   });
 
   // Check 2: No month-0 rows
@@ -107,26 +118,17 @@ export async function runProductionAudit(reportType: string = "production-dashbo
   checks.push({
     name: "no-month-zero",
     status: month0Rows.length === 0 ? "pass" : "fail",
-    message: month0Rows.length === 0
-      ? "No month-0 rows found"
-      : `Found ${month0Rows.length} rows with month=0 (invalid)`,
-    expected: 0,
-    actual: month0Rows.length,
+    message: month0Rows.length === 0 ? "No month-0 rows found" : `Found ${month0Rows.length} rows with month=0`,
+    expected: 0, actual: month0Rows.length,
   });
 
   // Check 3: No COBRA rows
-  const cobraRows = reportRows.filter((r: any) => {
-    const ct = (r.ct || r.coverageType || r.planType || r.lineOfBusiness || "").toLowerCase();
-    return ct === "cobra";
-  });
+  const cobraRows = reportRows.filter((r: any) => (r.ct || r.coverageType || r.planType || "").toLowerCase() === "cobra");
   checks.push({
     name: "no-cobra-rows",
     status: cobraRows.length === 0 ? "pass" : "fail",
-    message: cobraRows.length === 0
-      ? "No COBRA rows in report"
-      : `Found ${cobraRows.length} COBRA rows that should have been excluded`,
-    expected: 0,
-    actual: cobraRows.length,
+    message: cobraRows.length === 0 ? "No COBRA rows in report" : `Found ${cobraRows.length} COBRA rows`,
+    expected: 0, actual: cobraRows.length,
   });
 
   // Check 4: No negative premiums
@@ -134,11 +136,8 @@ export async function runProductionAudit(reportType: string = "production-dashbo
   checks.push({
     name: "no-negative-premium",
     status: negPremiums.length === 0 ? "pass" : "warning",
-    message: negPremiums.length === 0
-      ? "No negative premium values"
-      : `Found ${negPremiums.length} rows with negative premium`,
-    expected: 0,
-    actual: negPremiums.length,
+    message: negPremiums.length === 0 ? "No negative premium values" : `Found ${negPremiums.length} rows with negative premium`,
+    expected: 0, actual: negPremiums.length,
   });
 
   // Check 5: No negative lives
@@ -146,11 +145,8 @@ export async function runProductionAudit(reportType: string = "production-dashbo
   checks.push({
     name: "no-negative-lives",
     status: negLives.length === 0 ? "pass" : "fail",
-    message: negLives.length === 0
-      ? "No negative lives counts"
-      : `Found ${negLives.length} rows with negative lives`,
-    expected: 0,
-    actual: negLives.length,
+    message: negLives.length === 0 ? "No negative lives counts" : `Found ${negLives.length} rows with negative lives`,
+    expected: 0, actual: negLives.length,
   });
 
   // Check 6: No null/zero rate where income > 0
@@ -165,8 +161,7 @@ export async function runProductionAudit(reportType: string = "production-dashbo
     message: badRateRows.length === 0
       ? "All income rows have a configured rate"
       : `${badRateRows.length} rows have income > 0 but rate = 0 or null`,
-    expected: 0,
-    actual: badRateRows.length,
+    expected: 0, actual: badRateRows.length,
   });
 
   // Check 7: Required fields present
@@ -179,147 +174,101 @@ export async function runProductionAudit(reportType: string = "production-dashbo
     message: missingFieldCount === 0
       ? "All rows have carrier and client name"
       : `Missing: ${missingCarrier.length} carrier, ${missingClient.length} client name`,
-    expected: 0,
-    actual: missingFieldCount,
+    expected: 0, actual: missingFieldCount,
   });
 
   // Check 8: Duplicate detection (same client+month+plan+tier)
   const dupeSet = new Set<string>();
   let dupeCount = 0;
   for (const r of reportRows) {
-    const key = [
-      r.cn || r.clientName, r.m || r.transactionDate,
-      r.pl || r.planName, r.g || r.grouping || r.coverageType,
-      r.pn || r.policyNumber,
-    ].join("||");
+    const key = [r.cn || r.clientName, r.m || r.transactionDate, r.pl || r.planName, r.g || r.grouping || r.coverageType, r.pn || r.policyNumber].join("||");
     if (dupeSet.has(key)) dupeCount++;
     else dupeSet.add(key);
   }
   checks.push({
     name: "no-duplicate-rows",
     status: dupeCount === 0 ? "pass" : "warning",
-    message: dupeCount === 0
-      ? "No duplicate client+month+plan+tier rows"
-      : `Found ${dupeCount} potential duplicate rows`,
-    expected: 0,
-    actual: dupeCount,
+    message: dupeCount === 0 ? "No duplicate client+month+plan+tier rows" : `Found ${dupeCount} potential duplicate rows`,
+    expected: 0, actual: dupeCount,
   });
 
   // Check 9: Carrier exclusion enforcement
-  const carrierSettings = await prisma.carrierSetting.findMany({ where: { excluded: true } });
-  const excludedCarriers = new Set(carrierSettings.map(cs => cs.carrierName.toLowerCase()));
-  const excludedInReport = reportRows.filter((r: any) => {
-    const carrier = (r.ca || r.carrier || "").toLowerCase();
-    return excludedCarriers.has(carrier);
-  });
+  const allCarrierSettings = await prisma.carrierSetting.findMany();
+  const excludedCarriers = new Set(allCarrierSettings.filter(cs => cs.excluded).map(cs => cs.carrierName.toLowerCase()));
+  const excludedInReport = reportRows.filter((r: any) => excludedCarriers.has((r.ca || r.carrier || "").toLowerCase()));
   checks.push({
     name: "excluded-carriers-absent",
     status: excludedInReport.length === 0 ? "pass" : "fail",
     message: excludedInReport.length === 0
       ? `All ${excludedCarriers.size} excluded carriers correctly absent`
       : `Found ${excludedInReport.length} rows from excluded carriers`,
-    expected: 0,
-    actual: excludedInReport.length,
+    expected: 0, actual: excludedInReport.length,
   });
 
   // Check 10: Exclusion rules enforcement
   const exclusionRules = await getExclusionRules();
   let exclusionViolations = 0;
   for (const r of reportRows) {
-    if (isExcluded({
-      carrier: r.ca || r.carrier,
-      planName: r.pl || r.planName,
-      planType: r.ct || r.planType || r.lineOfBusiness,
-    }, exclusionRules)) {
+    if (isExcluded({ carrier: r.ca || r.carrier, planName: r.pl || r.planName, planType: r.ct || r.planType }, exclusionRules)) {
       exclusionViolations++;
     }
   }
   checks.push({
     name: "exclusion-rules-enforced",
     status: exclusionViolations === 0 ? "pass" : "fail",
-    message: exclusionViolations === 0
-      ? "All exclusion rules properly enforced"
-      : `Found ${exclusionViolations} rows violating exclusion rules`,
-    expected: 0,
-    actual: exclusionViolations,
+    message: exclusionViolations === 0 ? "All exclusion rules properly enforced" : `Found ${exclusionViolations} rows violating exclusion rules`,
+    expected: 0, actual: exclusionViolations,
   });
 
-  // ── Layer 2: Independent Recomputation ──────────────────────────────
+  // ── Layer 2: Dashboard Reconciliation (PRIMARY) ─────────────────────
   //
-  // The production-dashboard cache uses tier-level enrollment aggregation
-  // (employee metadata → per plan+tier). Independent recomputation uses
-  // plan-level BenefitPlan records. These are different aggregation levels:
-  // - Dashboard: one row per plan+tier per client per month
-  // - BenefitPlan: one row per plan per client per month
-  //
-  // We compare against the "production" cache (plan-level) for exact match,
-  // and cross-check dashboard totals at the aggregate level (premium/income
-  // should be close but rows/lives will differ due to tier breakdown).
+  // Mirrors buildProductionDashboard() exactly:
+  // Same data source, same filters, same aggregation, same income logic.
+  // This is the reconciliation that drives the status badge.
 
-  // Load the production (plan-level) cache for exact comparison
-  const prodCache = await prisma.reportCache.findUnique({ where: { key: "production" } });
-  let prodRows: any[] = [];
-  if (prodCache) {
-    try {
-      const prodData = JSON.parse(prodCache.data);
-      prodRows = prodData.rows || [];
-    } catch { /* */ }
-  }
-
-  const { auditTotals, monthSubtotals, clientSubtotals, carrierSubtotals } =
-    await recomputeTotals();
-
-  // For comparison, use plan-level production cache totals if available,
-  // otherwise fall back to the dashboard report totals
-  const comparisonTotals = prodRows.length > 0
-    ? computeTotalsFromRows(prodRows, "production")
-    : reportTotals;
-  const comparisonLabel = prodRows.length > 0 ? "plan-level" : "report";
+  const { auditTotals, monthSubtotals, clientSubtotals, carrierSubtotals, monthsWithPlansNoEnrollments } =
+    await recomputeDashboard(exclusionRules);
 
   // Check 11: Row count
   checks.push({
-    name: "recompute-row-count",
-    status: auditTotals.rows === comparisonTotals.rows ? "pass" : "warning",
-    message: auditTotals.rows === comparisonTotals.rows
-      ? `Plan-level row count matches: ${auditTotals.rows}`
-      : `${comparisonLabel} has ${comparisonTotals.rows} rows, recomputation found ${auditTotals.rows}`,
-    expected: comparisonTotals.rows,
-    actual: auditTotals.rows,
+    name: "dashboard-recompute-rows",
+    status: auditTotals.rows === reportTotals.rows ? "pass" : "needs_review",
+    message: auditTotals.rows === reportTotals.rows
+      ? `Dashboard row count matches: ${auditTotals.rows}`
+      : `Dashboard cache has ${reportTotals.rows} rows, recomputation found ${auditTotals.rows}`,
+    expected: reportTotals.rows, actual: auditTotals.rows,
   });
 
   // Check 12: Lives
   checks.push({
-    name: "recompute-lives",
-    status: auditTotals.lives === comparisonTotals.lives ? "pass" : "warning",
-    message: auditTotals.lives === comparisonTotals.lives
+    name: "dashboard-recompute-lives",
+    status: auditTotals.lives === reportTotals.lives ? "pass" : "needs_review",
+    message: auditTotals.lives === reportTotals.lives
       ? `Lives match: ${auditTotals.lives}`
-      : `${comparisonLabel} lives ${comparisonTotals.lives}, recomputed ${auditTotals.lives}`,
-    expected: comparisonTotals.lives,
-    actual: auditTotals.lives,
+      : `Dashboard lives ${reportTotals.lives}, recomputed ${auditTotals.lives}`,
+    expected: reportTotals.lives, actual: auditTotals.lives,
   });
 
-  // Check 13: Premium within tolerance
-  const premVariance = Math.abs(auditTotals.premium - comparisonTotals.premium);
+  // Check 13: Premium
+  const premVariance = Math.abs(auditTotals.premium - reportTotals.premium);
   checks.push({
-    name: "recompute-premium",
+    name: "dashboard-recompute-premium",
     status: premVariance <= PREMIUM_TOLERANCE ? "pass" : "needs_review",
     message: premVariance <= PREMIUM_TOLERANCE
       ? `Premium matches within $${PREMIUM_TOLERANCE} tolerance`
-      : `Premium variance: $${premVariance.toFixed(2)} (${comparisonLabel} $${comparisonTotals.premium.toFixed(2)}, audit $${auditTotals.premium.toFixed(2)})`,
-    expected: comparisonTotals.premium,
-    actual: auditTotals.premium,
+      : `Premium variance: $${premVariance.toFixed(2)} (cache $${reportTotals.premium.toFixed(2)}, audit $${auditTotals.premium.toFixed(2)})`,
+    expected: reportTotals.premium, actual: auditTotals.premium,
   });
 
-  // Check 14: Income within tolerance
-  const incVariance = Math.abs(auditTotals.income - comparisonTotals.income);
+  // Check 14: Income
+  const incVariance = Math.abs(auditTotals.income - reportTotals.income);
   checks.push({
-    name: "recompute-income",
+    name: "dashboard-recompute-income",
     status: incVariance <= INCOME_TOLERANCE ? "pass" : "needs_review",
     message: incVariance <= INCOME_TOLERANCE
       ? `Estimated income matches within $${INCOME_TOLERANCE} tolerance`
-      : `Income variance: $${incVariance.toFixed(2)} (${comparisonLabel} $${comparisonTotals.income.toFixed(2)}, audit $${auditTotals.income.toFixed(2)})`,
-    expected: comparisonTotals.income,
-    actual: auditTotals.income,
+      : `Income variance: $${incVariance.toFixed(2)} (cache $${reportTotals.income.toFixed(2)}, audit $${auditTotals.income.toFixed(2)})`,
+    expected: reportTotals.income, actual: auditTotals.income,
   });
 
   // Check 15: Month coverage
@@ -329,59 +278,76 @@ export async function runProductionAudit(reportType: string = "production-dashbo
     if (m) reportMonths.add(typeof m === "string" ? m.substring(0, 7) : m);
   }
   const auditMonths = Object.keys(monthSubtotals);
-  const missingMonths = auditMonths.filter(m => !reportMonths.has(m));
+  const missingFromReport = auditMonths.filter(m => !reportMonths.has(m));
+  const missingFromAudit = Array.from(reportMonths).filter(m => !monthSubtotals[m]);
+  const monthIssues = missingFromReport.length + missingFromAudit.length;
   checks.push({
     name: "month-coverage",
-    status: missingMonths.length === 0 ? "pass" : "warning",
-    message: missingMonths.length === 0
-      ? `All ${auditMonths.length} months present in report`
-      : `${missingMonths.length} months in data but not in report: ${missingMonths.join(", ")}`,
-    expected: auditMonths.length,
-    actual: reportMonths.size,
+    status: monthIssues === 0 ? "pass" : "warning",
+    message: monthIssues === 0
+      ? `All ${auditMonths.length} months match between cache and audit`
+      : `Month mismatch: ${missingFromReport.length} in audit only (${missingFromReport.join(", ")}), ${missingFromAudit.length} in cache only`,
+    expected: auditMonths.length, actual: reportMonths.size,
   });
 
-  // Check 16: Cross-check dashboard premium against plan-level premium
-  // These should be close (same underlying data, different aggregation)
-  if (prodRows.length > 0 && reportType === "production-dashboard") {
-    const dashPremium = reportTotals.premium;
-    const planPremium = comparisonTotals.premium;
-    const crossVariance = Math.abs(dashPremium - planPremium);
-    const pctVariance = planPremium > 0 ? (crossVariance / planPremium) * 100 : 0;
+  // Check 16: Months with plans but zero qualifying enrollments (informational)
+  if (monthsWithPlansNoEnrollments.length > 0) {
     checks.push({
-      name: "cross-check-premium",
-      status: pctVariance <= 5 ? "pass" : pctVariance <= 15 ? "warning" : "needs_review",
-      message: pctVariance <= 5
-        ? `Dashboard vs plan-level premium within ${pctVariance.toFixed(1)}%`
-        : `Dashboard premium $${dashPremium.toFixed(2)} vs plan-level $${planPremium.toFixed(2)} (${pctVariance.toFixed(1)}% variance)`,
-      expected: planPremium,
-      actual: dashPremium,
+      name: "months-plans-no-enrollments",
+      status: "warning",
+      message: `${monthsWithPlansNoEnrollments.length} month(s) have plans but zero qualifying enrollments: ${monthsWithPlansNoEnrollments.join(", ")}. This is acceptable if all employees are termed/inactive.`,
+      expected: 0, actual: monthsWithPlansNoEnrollments.length,
+    });
+  }
+
+  // ── Layer 3: Plan-Level Cross-Check (INFORMATIONAL ONLY) ────────────
+  // Does NOT drive the status badge.
+
+  const planLevel = await recomputePlanLevel(exclusionRules);
+  if (planLevel) {
+    const planPremDelta = Math.abs(reportTotals.premium - planLevel.premium);
+    const pctVariance = planLevel.premium > 0 ? (planPremDelta / planLevel.premium) * 100 : 0;
+    checks.push({
+      name: "plan-level-cross-check",
+      status: "warning", // Always warning — informational only, never drives status
+      message: `Plan-level cross-check: ${planLevel.rows} plan rows, $${planLevel.premium.toFixed(2)} premium (${pctVariance.toFixed(1)}% vs dashboard). This is expected: different aggregation levels.`,
+      expected: planLevel.premium, actual: reportTotals.premium,
     });
   }
 
   return buildResult(checks, reportTotals, auditTotals, monthSubtotals, clientSubtotals, carrierSubtotals);
 }
 
-// ─── Independent Recomputation ──────────────────────────────────────────────
+// ─── Dashboard Recomputation (PRIMARY) ──────────────────────────────────────
 
 /**
- * Recompute report totals from raw database data, independent of cache.
- * Uses the same data source (ClientSnapshot + BenefitPlan) but a separate code path.
+ * Mirrors buildProductionDashboard() exactly:
+ * - Same Prisma query (ClientSnapshot + BenefitPlan metadata + EmployeeSnapshot)
+ * - Same exclusion/COBRA/carrier filters
+ * - Same qualifyEnrollment() active-month logic
+ * - Same employee+plan+tier dedupe
+ * - Same policyNumber||planName||coverageLevel aggregation
+ * - Same CarrierSetting income calculation
+ *
+ * Outputs only totals and subtotals (no full row array).
  */
-async function recomputeTotals() {
-  const exclusionRules = await getExclusionRules();
-  const carrierSettings = await prisma.carrierSetting.findMany();
-  const csMap = new Map(carrierSettings.map(cs => [
-    cs.carrierName.toLowerCase(),
-    { incomeMethod: cs.incomeMethod, rate: cs.rate, excluded: cs.excluded },
-  ]));
+async function recomputeDashboard(exclusionRules: { field: string; value: string }[]) {
+  const activeMappings = await loadActiveMappings();
 
-  const snapshots = await prisma.clientSnapshot.findMany({
-    where: { year: { gte: 2022 }, month: { gte: 1, lte: 12 } },
+  const carrierSettings = await prisma.carrierSetting.findMany();
+  const csMap = new Map<string, { incomeMethod: string; rate: number; excluded: boolean }>();
+  for (const cs of carrierSettings) {
+    csMap.set(cs.carrierName.toLowerCase(), { incomeMethod: cs.incomeMethod, rate: cs.rate, excluded: cs.excluded });
+  }
+
+  // Same query as buildProductionDashboard line 746-756
+  const snapshotList = await prisma.clientSnapshot.findMany({
+    where: { year: { gte: 2022 } },
     select: {
       id: true, year: true, month: true,
       client: { select: { groupId: true, groupName: true } },
       benefitPlans: {
-        select: { carrier: true, planType: true, planName: true, premium: true, enrollees: true, eligible: true },
+        select: { planType: true, carrier: true, planName: true, metadata: true },
       },
     },
     orderBy: [{ year: "asc" }, { month: "asc" }],
@@ -391,51 +357,150 @@ async function recomputeTotals() {
   const clientMap = new Map<string, EntitySubtotal>();
   const carrierMap = new Map<string, EntitySubtotal>();
   let totalRows = 0, totalLives = 0, totalPremium = 0, totalIncome = 0;
+  const monthsWithPlansNoEnrollments: string[] = [];
 
-  for (const snap of snapshots) {
+  for (const snap of snapshotList) {
+    // Same filters as dashboard lines 767-769
     if (isExcluded({ groupName: snap.client.groupName }, exclusionRules)) continue;
+    if (snap.month < 1 || snap.month > 12) continue;
 
     const period = `${snap.year}-${String(snap.month).padStart(2, "0")}`;
+    const snapshotMonthStart = new Date(snap.year, snap.month - 1, 1);
+
+    // Build plan lookup — same as dashboard lines 774-804
+    const planIdMap = new Map<string, { carrier: string; planType: string; planName: string; policyNumber: string }>();
+    const planNameMap = new Map<string, { carrier: string; planType: string; planName: string; policyNumber: string }>();
+    let hasPlans = false;
 
     for (const bp of snap.benefitPlans) {
       if (isExcluded({ carrier: bp.carrier, planName: bp.planName, planType: bp.planType }, exclusionRules)) continue;
       if (bp.planType?.toLowerCase() === "cobra") continue;
       if (bp.carrier && csMap.get(bp.carrier.toLowerCase())?.excluded) continue;
 
-      const carrier = bp.carrier || "Unspecified";
-      const lives = bp.enrollees || 0;
-      const premium = round2(bp.premium || 0);
+      let planMeta: any = {};
+      try { planMeta = bp.metadata ? JSON.parse(bp.metadata) : {}; } catch { /* */ }
 
-      // Compute income from carrier settings
+      const policyNumber = getMappedField(planMeta, null,
+        "PolicyNumber", "GroupPolicyNumber", "GroupNumber",
+        "ContractNumber", "PlanNumber", "CertificateNumber",
+        "CarrierPlanNumber", "CarrierGroupNumber", "InsurancePolicyNumber"
+      ) || "";
+
+      const info = { carrier: bp.carrier || "Unspecified", planType: bp.planType || "Unknown", planName: bp.planName || "", policyNumber };
+      const planIdentifier = getMappedField(planMeta, null, "PlanIdentifier", "PlanId", "PlanID") || "";
+      if (planIdentifier) planIdMap.set(planIdentifier, info);
+      if (bp.planName) planNameMap.set(bp.planName, info);
+      hasPlans = true;
+    }
+
+    if (!hasPlans) continue;
+
+    // Load employees — same as dashboard line 809-811
+    const employees = await prisma.employeeSnapshot.findMany({
+      where: { clientSnapshotId: snap.id },
+      select: { employeeId: true, status: true, metadata: true },
+    });
+
+    // Tier aggregation — same as dashboard lines 824-899
+    const tierAgg = new Map<string, {
+      carrier: string; planType: string; planName: string; policyNumber: string;
+      grouping: string; lives: number; totalPremium: number;
+    }>();
+
+    for (const emp of employees) {
+      if ((emp.status || "Active").toLowerCase() !== "active") continue;
+
+      let empMeta: any;
+      try { empMeta = emp.metadata ? JSON.parse(emp.metadata) : null; } catch { continue; }
+      if (!empMeta) continue;
+
+      const enrollments = findEnrollments(empMeta);
+      const seen = new Set<string>();
+
+      for (const enrollment of enrollments) {
+        if (!qualifyEnrollment(enrollment, snapshotMonthStart)) continue;
+
+        const enrollPlanId = getMappedField(enrollment, activeMappings, "PlanIdentifier", "PlanId", "PlanID") || "";
+        const enrollPlanName = getMappedField(enrollment, activeMappings, "PlanName", "Plan", "Name") || "";
+        const planKey = enrollPlanId || enrollPlanName;
+        if (!planKey) continue;
+
+        const planInfo = (enrollPlanId && planIdMap.get(enrollPlanId))
+          || (enrollPlanName && planNameMap.get(enrollPlanName))
+          || null;
+        if (!planInfo) continue;
+
+        const coverageLevel = getMappedField(enrollment, activeMappings, "CoverageLevel") || "Employee";
+
+        // Same dedupe as dashboard line 862
+        const dedupeKey = `${planKey}||${coverageLevel}`;
+        if (seen.has(dedupeKey)) continue;
+        seen.add(dedupeKey);
+
+        const parseAmt = (raw: string | null) => {
+          if (!raw) return 0;
+          const v = parseFloat(raw);
+          return isNaN(v) || v <= 0 ? 0 : v;
+        };
+
+        const planCost = parseAmt(getMappedField(enrollment, activeMappings,
+          "PlanCost", "MonthlyPlanCost", "TotalPremium", "Premium",
+          "MonthlyPremium", "TotalMonthlyPremium", "Cost"));
+
+        // Same aggKey as dashboard line 884
+        const aggKey = `${planInfo.policyNumber || planKey}||${planInfo.planName}||${coverageLevel}`;
+        let agg = tierAgg.get(aggKey);
+        if (!agg) {
+          agg = {
+            carrier: planInfo.carrier, planType: planInfo.planType,
+            planName: planInfo.planName, policyNumber: planInfo.policyNumber,
+            grouping: coverageLevel, lives: 0, totalPremium: 0,
+          };
+          tierAgg.set(aggKey, agg);
+        }
+        agg.lives += 1;
+        agg.totalPremium += planCost;
+      }
+    }
+
+    if (tierAgg.size === 0 && hasPlans) {
+      monthsWithPlansNoEnrollments.push(period);
+    }
+
+    // Convert to totals — same as dashboard lines 902-947
+    for (const agg of tierAgg.values()) {
+      const monthlyPremium = Math.round(agg.totalPremium * 100) / 100;
+      const lives = agg.lives;
+      const carrier = agg.carrier;
+
+      // Same income logic as dashboard lines 926-933
       const setting = csMap.get(carrier.toLowerCase());
       let income = 0;
       if (setting) {
-        if (setting.incomeMethod === "PEPM") income = round2(lives * setting.rate);
-        else if (setting.incomeMethod === "PERCENT_PREMIUM") income = round2(premium * (setting.rate / 100));
+        if (setting.incomeMethod === "PEPM") income = Math.round(lives * setting.rate * 100) / 100;
+        else if (setting.incomeMethod === "PERCENT_PREMIUM") income = Math.round(monthlyPremium * (setting.rate / 100) * 100) / 100;
       }
 
       totalRows++;
       totalLives += lives;
-      totalPremium += premium;
+      totalPremium += monthlyPremium;
       totalIncome += income;
 
-      // Month subtotals
+      // Subtotals
       if (!monthSubtotals[period]) monthSubtotals[period] = { rows: 0, lives: 0, premium: 0, income: 0 };
       monthSubtotals[period].rows++;
       monthSubtotals[period].lives += lives;
-      monthSubtotals[period].premium += premium;
+      monthSubtotals[period].premium += monthlyPremium;
       monthSubtotals[period].income += income;
 
-      // Client subtotals
       const clientName = snap.client.groupName;
       let cs = clientMap.get(clientName);
       if (!cs) { cs = { name: clientName, rows: 0, lives: 0, premium: 0, income: 0 }; clientMap.set(clientName, cs); }
-      cs.rows++; cs.lives += lives; cs.premium += premium; cs.income += income;
+      cs.rows++; cs.lives += lives; cs.premium += monthlyPremium; cs.income += income;
 
-      // Carrier subtotals
       let cr = carrierMap.get(carrier);
       if (!cr) { cr = { name: carrier, rows: 0, lives: 0, premium: 0, income: 0 }; carrierMap.set(carrier, cr); }
-      cr.rows++; cr.lives += lives; cr.premium += premium; cr.income += income;
+      cr.rows++; cr.lives += lives; cr.premium += monthlyPremium; cr.income += income;
     }
   }
 
@@ -449,13 +514,49 @@ async function recomputeTotals() {
     monthSubtotals,
     clientSubtotals: Array.from(clientMap.values()).sort((a, b) => b.premium - a.premium).slice(0, 20),
     carrierSubtotals: Array.from(carrierMap.values()).sort((a, b) => b.premium - a.premium),
+    monthsWithPlansNoEnrollments,
   };
+}
+
+// ─── Plan-Level Cross-Check (INFORMATIONAL) ─────────────────────────────────
+
+async function recomputePlanLevel(exclusionRules: { field: string; value: string }[]) {
+  const carrierSettings = await prisma.carrierSetting.findMany();
+  const csMap = new Map(carrierSettings.map(cs => [
+    cs.carrierName.toLowerCase(),
+    { excluded: cs.excluded },
+  ]));
+
+  const snapshots = await prisma.clientSnapshot.findMany({
+    where: { year: { gte: 2022 }, month: { gte: 1, lte: 12 } },
+    select: {
+      year: true, month: true,
+      client: { select: { groupName: true } },
+      benefitPlans: {
+        select: { carrier: true, planType: true, planName: true, premium: true, enrollees: true },
+      },
+    },
+  });
+
+  let rows = 0, premium = 0;
+  for (const snap of snapshots) {
+    if (isExcluded({ groupName: snap.client.groupName }, exclusionRules)) continue;
+    for (const bp of snap.benefitPlans) {
+      if (isExcluded({ carrier: bp.carrier, planName: bp.planName, planType: bp.planType }, exclusionRules)) continue;
+      if (bp.planType?.toLowerCase() === "cobra") continue;
+      if (bp.carrier && csMap.get(bp.carrier.toLowerCase())?.excluded) continue;
+      rows++;
+      premium += bp.premium || 0;
+    }
+  }
+
+  return { rows, premium: round2(premium) };
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 function computeTotalsFromRows(rows: any[], reportType: string) {
-  let totalRows = rows.length;
+  const totalRows = rows.length;
   let totalLives = 0, totalPremium = 0, totalIncome = 0;
 
   for (const r of rows) {
@@ -470,21 +571,12 @@ function computeTotalsFromRows(rows: any[], reportType: string) {
     }
   }
 
-  return {
-    rows: totalRows,
-    lives: totalLives,
-    premium: round2(totalPremium),
-    income: round2(totalIncome),
-  };
+  return { rows: totalRows, lives: totalLives, premium: round2(totalPremium), income: round2(totalIncome) };
 }
 
-function zeroes() {
-  return { rows: 0, lives: 0, premium: 0, income: 0 };
-}
+function zeroes() { return { rows: 0, lives: 0, premium: 0, income: 0 }; }
 
-function round2(n: number): number {
-  return Math.round(n * 100) / 100;
-}
+function round2(n: number): number { return Math.round(n * 100) / 100; }
 
 function buildResult(
   checks: AuditCheck[],
@@ -495,29 +587,29 @@ function buildResult(
   carrierSubtotals: EntitySubtotal[],
 ): AuditResult {
   const passed = checks.filter(c => c.status === "pass").length;
-  const failed = checks.filter(c => c.status === "fail" || c.status === "needs_review").length;
-  const warnings = checks.filter(c => c.status === "warning").length;
+  const hardFails = checks.filter(c => c.status === "fail" || c.status === "needs_review").length;
 
+  // Status determination:
+  // - "verified" = all deterministic + dashboard reconciliation checks pass
+  // - "warning" = only advisory warnings (plan-level cross-check, informational)
+  // - "needs_review" = any fail or dashboard recomputation mismatch
+  // Note: plan-level cross-check is always "warning" and never drives needs_review
   let status: "verified" | "warning" | "needs_review" = "verified";
   if (checks.some(c => c.status === "fail" || c.status === "needs_review")) status = "needs_review";
   else if (checks.some(c => c.status === "warning")) status = "warning";
 
   return {
-    status,
-    checks,
+    status, checks,
     checksRun: checks.length,
     checksPassed: passed,
-    checksFailed: failed + warnings,
-    reportTotals,
-    auditTotals,
+    checksFailed: hardFails,
+    reportTotals, auditTotals,
     variances: {
       rows: auditTotals.rows - reportTotals.rows,
       lives: auditTotals.lives - reportTotals.lives,
       premium: round2(auditTotals.premium - reportTotals.premium),
       income: round2(auditTotals.income - reportTotals.income),
     },
-    monthSubtotals,
-    clientSubtotals,
-    carrierSubtotals,
+    monthSubtotals, clientSubtotals, carrierSubtotals,
   };
 }

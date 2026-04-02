@@ -74,6 +74,10 @@ function getMappedField(
   return getField(obj, primaryField, ...hardcodedFallbacks);
 }
 
+// ─── Exported Helpers (used by report-audit.ts) ─────────────────────────────
+
+export { findEnrollments, getField, qualifyEnrollment, getMappedField, loadActiveMappings };
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function findEnrollments(meta: any): any[] {
@@ -243,6 +247,8 @@ async function processAllSnapshots(): Promise<ProcessedSnapshot[]> {
 
     for (const bp of snap.benefitPlans) {
       if (isExcluded({ carrier: bp.carrier, planName: bp.planName, planType: bp.planType }, exclusionRules)) continue;
+      // Explicit COBRA exclusion — matches dashboard behavior
+      if (bp.planType?.toLowerCase() === "cobra") continue;
 
       const carrier = bp.carrier || "Unspecified Carrier";
       const key = `${carrier}||${bp.planType}`;
@@ -273,7 +279,10 @@ async function processAllSnapshots(): Promise<ProcessedSnapshot[]> {
 
 // ─── Build Production Report ─────────────────────────────────────────────────
 
-function buildProductionReport(snapshots: ProcessedSnapshot[]) {
+function buildProductionReport(
+  snapshots: ProcessedSnapshot[],
+  csMap: Map<string, { incomeMethod: string; rate: number; excluded: boolean }>
+) {
   const rows: any[] = [];
   const clientsSet = new Set<string>();
   const periodsSet = new Set<string>();
@@ -290,14 +299,16 @@ function buildProductionReport(snapshots: ProcessedSnapshot[]) {
     for (const entry of snap.agg.values()) {
       const enrolled = entry.enrolled;
       const premium = Math.round(entry.premium * 100) / 100;
-      const isPEPM = PEPM_CARRIERS.some(c => entry.carrier.toLowerCase().includes(c.toLowerCase()));
-      const isComm = COMMISSION_CARRIERS.some(c => entry.carrier.toLowerCase().includes(c.toLowerCase()));
 
-      // Estimated Income is calculated from enrollment-derived premium and carrier settings.
-      // PEPM: enrolled x rate. Commission: premium x rate. This is an operational estimate.
+      // Estimated Income from CarrierSetting table — matches dashboard/audit logic.
+      // PEPM: enrolled x configured rate. PERCENT_PREMIUM: premium x configured rate.
+      const setting = csMap.get(entry.carrier.toLowerCase());
       let feeType = "", rate = "", estMonthlyFee = 0;
-      if (isPEPM) { feeType = "PEPM"; rate = `$${PEPM_RATE} PEPM`; estMonthlyFee = enrolled * PEPM_RATE; }
-      else if (isComm) { feeType = "Commission"; rate = `${COMMISSION_RATE * 100}%`; estMonthlyFee = premium * COMMISSION_RATE; }
+      if (setting && setting.incomeMethod === "PEPM") {
+        feeType = "PEPM"; rate = `$${setting.rate} PEPM`; estMonthlyFee = enrolled * setting.rate;
+      } else if (setting && setting.incomeMethod === "PERCENT_PREMIUM") {
+        feeType = "Commission"; rate = `${setting.rate}%`; estMonthlyFee = premium * (setting.rate / 100);
+      }
       estMonthlyFee = Math.round(estMonthlyFee * 100) / 100;
 
       totalPremium += premium;
@@ -354,9 +365,8 @@ function buildProductionReport(snapshots: ProcessedSnapshot[]) {
     periods: sortedPeriods,
     methodology: {
       dataSource: "Employee Navigator XML enrollment data",
-      pepmCarriers: PEPM_CARRIERS, commissionCarriers: COMMISSION_CARRIERS,
-      pepmRate: PEPM_RATE, commissionRate: COMMISSION_RATE,
-      note: "Premiums reflect monthly billing amounts from Employee Navigator. Estimated fees use the same model as the Income Report. Actual collected revenue is tracked in Kennion/NIA financial statements and may differ due to timing, retro adjustments, and billing cycles.",
+      incomeSource: "CarrierSetting table (PEPM / PERCENT_PREMIUM / NONE per carrier)",
+      note: "Premiums reflect monthly billing amounts from Employee Navigator. Estimated income uses carrier-specific rates from the CarrierSetting table. Actual collected revenue is tracked in Kennion/NIA financial statements and may differ due to timing, retro adjustments, and billing cycles.",
     },
   };
 }
@@ -986,11 +996,18 @@ export async function rebuildAllCaches(): Promise<{ timings: Record<string, numb
   const snapshots = await processAllSnapshots();
   const processTime = Date.now() - t0;
 
+  // Load carrier settings for income calculation (used by production report)
+  const carrierSettings = await prisma.carrierSetting.findMany();
+  const csMap = new Map<string, { incomeMethod: string; rate: number; excluded: boolean }>();
+  for (const cs of carrierSettings) {
+    csMap.set(cs.carrierName.toLowerCase(), { incomeMethod: cs.incomeMethod, rate: cs.rate, excluded: cs.excluded });
+  }
+
   const timings: Record<string, number> = { processSnapshots: processTime };
 
   // Build lightweight reports from pre-aggregated data (CPU-bound, no I/O)
   const builders: [string, () => any][] = [
-    ["production", () => buildProductionReport(snapshots)],
+    ["production", () => buildProductionReport(snapshots, csMap)],
     ["dashboard", () => buildDashboard(snapshots)],
     ["income", () => buildIncomeReport(snapshots)],
     ["benefits", () => buildBenefitsReport(snapshots)],
