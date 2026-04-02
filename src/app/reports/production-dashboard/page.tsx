@@ -3,7 +3,7 @@
 import { useEffect, useState, useMemo, useRef, useCallback } from "react";
 import {
   Download, Search, ArrowUpDown, ArrowUp, ArrowDown,
-  Settings2, Save, X, ChevronDown,
+  Settings2, Save, X, ChevronDown, ShieldCheck, AlertTriangle, Loader2, Bot,
 } from "lucide-react";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -192,6 +192,214 @@ function FilterDropdown({
         </select>
         <ChevronDown className="absolute right-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400 pointer-events-none" />
       </div>
+    </div>
+  );
+}
+
+// ─── Report Audit Panel ─────────────────────────────────────────────────────
+
+/* eslint-disable @typescript-eslint/no-explicit-any */
+
+interface AuditCheck { name: string; status: string; message: string; expected?: any; actual?: any }
+interface AuditSummary {
+  id: string; status: string; checksRun: number; checksPassed: number; checksFailed: number;
+  reportTotalRows: number; reportTotalPremium: number; reportTotalIncome: number;
+  auditTotalRows: number; auditTotalPremium: number; auditTotalIncome: number;
+  varianceRows: number; variancePremium: number; varianceIncome: number;
+  aiReviewCompleted: boolean; createdAt: string;
+}
+
+function AuditPanel() {
+  const [latest, setLatest] = useState<AuditSummary | null>(null);
+  const [detail, setDetail] = useState<{ checks: AuditCheck[]; aiNote?: string } | null>(null);
+  const [running, setRunning] = useState(false);
+  const [aiRunning, setAiRunning] = useState(false);
+  const [expanded, setExpanded] = useState(false);
+
+  const loadLatest = useCallback(() => {
+    fetch("/api/reports/audit").then(r => r.json()).then((list: AuditSummary[]) => {
+      if (list.length > 0) setLatest(list[0]);
+    }).catch(() => {});
+  }, []);
+
+  useEffect(() => { loadLatest(); }, [loadLatest]);
+
+  async function runAudit() {
+    setRunning(true);
+    try {
+      const res = await fetch("/api/reports/audit", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ reportType: "production-dashboard" }),
+      });
+      const data = await res.json();
+      setLatest({ ...data, createdAt: new Date().toISOString() });
+      setDetail({ checks: data.checks });
+      setExpanded(true);
+    } catch { /* */ }
+    setRunning(false);
+  }
+
+  async function runAiReview() {
+    if (!latest?.id) return;
+    setAiRunning(true);
+    try {
+      const res = await fetch(`/api/reports/audit/${latest.id}/ai-review`, { method: "POST" });
+      const data = await res.json();
+      if (data.aiNote) {
+        setDetail(prev => prev ? { ...prev, aiNote: data.aiNote } : { checks: [], aiNote: data.aiNote });
+        setLatest(prev => prev ? { ...prev, aiReviewCompleted: true } : prev);
+      }
+    } catch { /* */ }
+    setAiRunning(false);
+  }
+
+  async function loadDetail() {
+    if (!latest?.id || detail?.checks?.length) { setExpanded(!expanded); return; }
+    try {
+      const res = await fetch(`/api/reports/audit/${latest.id}`);
+      const data = await res.json();
+      setDetail({ checks: data.checksDetail || [], aiNote: data.aiNote });
+    } catch { /* */ }
+    setExpanded(!expanded);
+  }
+
+  const statusBadge = (status: string) => {
+    if (status === "verified") return <span className="inline-flex items-center gap-1 px-2 py-0.5 text-xs font-semibold rounded-full bg-green-50 text-green-700"><ShieldCheck className="w-3 h-3" /> Verified by system checks</span>;
+    if (status === "warning") return <span className="inline-flex items-center gap-1 px-2 py-0.5 text-xs font-semibold rounded-full bg-yellow-50 text-yellow-700"><AlertTriangle className="w-3 h-3" /> Reconciliation warnings</span>;
+    return <span className="inline-flex items-center gap-1 px-2 py-0.5 text-xs font-semibold rounded-full bg-red-50 text-red-700"><AlertTriangle className="w-3 h-3" /> Needs review</span>;
+  };
+
+  const fmtCur = (n: number) => "$" + Math.abs(n).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+  return (
+    <div className="bg-white rounded-2xl border border-bob-border overflow-hidden mb-6">
+      <div className="px-5 py-4 flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <div className="w-8 h-8 rounded-lg bg-blue-50 flex items-center justify-center">
+            <ShieldCheck className="w-4 h-4 text-blue-600" />
+          </div>
+          <div>
+            <h3 className="text-sm font-semibold text-bob-text">Report Audit</h3>
+            {latest ? (
+              <div className="flex items-center gap-2 mt-0.5">
+                {statusBadge(latest.status)}
+                <span className="text-[10px] text-bob-text-soft">
+                  {new Date(latest.createdAt).toLocaleString()}
+                </span>
+                {latest.aiReviewCompleted && (
+                  <span className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-medium rounded bg-purple-50 text-purple-600">
+                    <Bot className="w-2.5 h-2.5" /> AI scan completed
+                  </span>
+                )}
+              </div>
+            ) : (
+              <p className="text-[10px] text-bob-text-soft">No audit run yet</p>
+            )}
+          </div>
+        </div>
+        <div className="flex items-center gap-2">
+          {latest && (
+            <button onClick={loadDetail} className="px-3 py-1.5 text-xs font-medium text-bob-text-soft hover:text-bob-text rounded-lg hover:bg-gray-50 transition-colors">
+              {expanded ? "Hide" : "Details"}
+            </button>
+          )}
+          <button onClick={runAudit} disabled={running}
+            className="px-3 py-1.5 text-xs font-medium bg-blue-50 text-blue-700 rounded-lg hover:bg-blue-100 transition-colors disabled:opacity-50">
+            {running ? <><Loader2 className="w-3 h-3 animate-spin inline mr-1" />Running...</> : "Run Audit"}
+          </button>
+        </div>
+      </div>
+
+      {/* Summary bar */}
+      {latest && (
+        <div className="px-5 pb-3 flex gap-4 text-[10px] text-bob-text-soft">
+          <span>{latest.checksPassed}/{latest.checksRun} checks passed</span>
+          <span>Rows: {latest.reportTotalRows}{latest.varianceRows !== 0 && ` (Δ${latest.varianceRows > 0 ? "+" : ""}${latest.varianceRows})`}</span>
+          <span>Premium: {fmtCur(latest.reportTotalPremium)}{latest.variancePremium !== 0 && ` (Δ${latest.variancePremium > 0 ? "+" : ""}${fmtCur(latest.variancePremium)})`}</span>
+          <span>Est. Income: {fmtCur(latest.reportTotalIncome)}{latest.varianceIncome !== 0 && ` (Δ${latest.varianceIncome > 0 ? "+" : ""}${fmtCur(latest.varianceIncome)})`}</span>
+        </div>
+      )}
+
+      {/* Detail panel */}
+      {expanded && detail && (
+        <div className="border-t border-bob-border px-5 py-4">
+          {/* Check list */}
+          <div className="mb-4">
+            <h4 className="text-xs font-semibold text-bob-text mb-2">Deterministic Checks</h4>
+            <div className="space-y-1 max-h-60 overflow-y-auto">
+              {detail.checks.map((c, i) => (
+                <div key={i} className={`text-xs px-3 py-1.5 rounded flex items-center justify-between ${
+                  c.status === "pass" ? "bg-green-50 text-green-700" :
+                  c.status === "warning" ? "bg-yellow-50 text-yellow-700" :
+                  "bg-red-50 text-red-700"
+                }`}>
+                  <span><span className="font-medium">{c.name}</span>: {c.message}</span>
+                  <span className="font-mono text-[10px]">{c.status.toUpperCase()}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Variance table */}
+          {latest && (latest.varianceRows !== 0 || latest.variancePremium !== 0 || latest.varianceIncome !== 0) && (
+            <div className="mb-4">
+              <h4 className="text-xs font-semibold text-bob-text mb-2">Reconciliation Variance</h4>
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className="border-b border-bob-border">
+                    <th className="text-left py-1 px-2 font-semibold text-bob-text-soft">Metric</th>
+                    <th className="text-right py-1 px-2 font-semibold text-bob-text-soft">Report</th>
+                    <th className="text-right py-1 px-2 font-semibold text-bob-text-soft">Audit</th>
+                    <th className="text-right py-1 px-2 font-semibold text-bob-text-soft">Variance</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {[
+                    ["Rows", latest.reportTotalRows, latest.auditTotalRows, latest.varianceRows],
+                    ["Premium", latest.reportTotalPremium, latest.auditTotalPremium, latest.variancePremium],
+                    ["Est. Income", latest.reportTotalIncome, latest.auditTotalIncome, latest.varianceIncome],
+                  ].map(([label, report, audit, variance]) => (
+                    <tr key={label as string} className="border-b border-bob-border-light">
+                      <td className="py-1.5 px-2 font-medium">{label}</td>
+                      <td className="py-1.5 px-2 text-right">{typeof report === "number" && label !== "Rows" ? fmtCur(report) : report}</td>
+                      <td className="py-1.5 px-2 text-right">{typeof audit === "number" && label !== "Rows" ? fmtCur(audit) : audit}</td>
+                      <td className={`py-1.5 px-2 text-right font-medium ${(variance as number) !== 0 ? "text-red-600" : "text-green-600"}`}>
+                        {(variance as number) === 0 ? "—" : typeof variance === "number" && label !== "Rows" ? `${variance > 0 ? "+" : ""}${fmtCur(variance)}` : `${(variance as number) > 0 ? "+" : ""}${variance}`}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          {/* AI Review */}
+          <div className="border-t border-bob-border-light pt-3">
+            <div className="flex items-center justify-between mb-2">
+              <h4 className="text-xs font-semibold text-bob-text flex items-center gap-1.5">
+                <Bot className="w-3.5 h-3.5 text-purple-500" /> AI Anomaly Scan
+                <span className="font-normal text-bob-text-soft">(advisory only)</span>
+              </h4>
+              {!detail.aiNote && (
+                <button onClick={runAiReview} disabled={aiRunning}
+                  className="px-3 py-1 text-[10px] font-medium bg-purple-50 text-purple-700 rounded-lg hover:bg-purple-100 transition-colors disabled:opacity-50">
+                  {aiRunning ? <><Loader2 className="w-2.5 h-2.5 animate-spin inline mr-1" />Analyzing...</> : "Request AI Review"}
+                </button>
+              )}
+            </div>
+            {detail.aiNote ? (
+              <div className="bg-purple-50/50 rounded-lg p-3 text-xs text-bob-text leading-relaxed whitespace-pre-wrap">
+                {detail.aiNote}
+              </div>
+            ) : (
+              <p className="text-[10px] text-bob-text-soft">
+                AI review is optional. Click to send the audit summary to OpenAI for anomaly explanation. This is not the primary verification signal.
+              </p>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -510,6 +718,9 @@ export default function ProductionDashboardPage() {
       {!loading && (
         <CarrierSettingsPanel settings={carrierSettings} onSave={handleSaveSetting} />
       )}
+
+      {/* Report Audit */}
+      {!loading && <AuditPanel />}
 
       {/* Filters */}
       {!loading && filterOptions && (

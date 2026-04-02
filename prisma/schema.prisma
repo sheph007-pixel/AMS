@@ -349,6 +349,60 @@ model SchemaTestResult {
   @@index([schemaVersionId])
 }
 
+// ─── Report Audit ───────────────────────────────────────────────────────────
+
+/// Persisted audit run for production report verification.
+/// Deterministic checks are the primary verification signal.
+/// AI review is optional and stored as a note only.
+model ReportAudit {
+  id        String   @id @default(cuid())
+
+  /// Scope
+  reportType String  /// "production", "production-dashboard"
+  scope      String  /// JSON: { years, months, carriers, clients } — filters at audit time
+  status     String  /// "verified", "warning", "needs_review"
+
+  /// Deterministic check results
+  checksRun    Int     @default(0)
+  checksPassed Int     @default(0)
+  checksFailed Int     @default(0)
+  checksDetail String? /// JSON array of { name, status, message, expected?, actual? }
+
+  /// Report totals (from cached report)
+  reportTotalRows     Int     @default(0)
+  reportTotalLives    Int     @default(0)
+  reportTotalPremium  Float   @default(0)
+  reportTotalIncome   Float   @default(0)
+
+  /// Independent recomputation totals
+  auditTotalRows     Int     @default(0)
+  auditTotalLives    Int     @default(0)
+  auditTotalPremium  Float   @default(0)
+  auditTotalIncome   Float   @default(0)
+
+  /// Variances (audit - report)
+  varianceRows    Int     @default(0)
+  varianceLives   Int     @default(0)
+  variancePremium Float   @default(0)
+  varianceIncome  Float   @default(0)
+
+  /// Per-month subtotals (JSON: { "2023-07": { rows, lives, premium, income } })
+  monthSubtotals  String? /// JSON object
+  /// Top client/carrier subtotals (JSON)
+  clientSubtotals  String? /// JSON array
+  carrierSubtotals String? /// JSON array
+
+  /// Optional AI anomaly review (NOT the primary signal)
+  aiReviewCompleted Boolean  @default(false)
+  aiNote            String?  /// AI-generated narrative, stored as note only
+  aiReviewedAt      DateTime?
+
+  createdAt DateTime @default(now())
+
+  @@index([reportType, createdAt])
+  @@index([status])
+}
+
 // ─── Report Cache ───────────────────────────────────────────────────────────
 
 /// Pre-computed report data. Rebuilt after each import.
