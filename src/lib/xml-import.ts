@@ -774,17 +774,19 @@ function countByPlan(employees: any[], year: number, month: number): {
       const enrollmentType = extractField(enrollment, "EnrollmentType", "Type");
       const isCurrent = enrollmentType && enrollmentType.toLowerCase() === "current";
 
-      // Fallback: if EnrollmentType is not present in the XML, use the old logic
-      // (no DeclineReason and coverage not ended)
+      // Qualify enrollment for this monthly snapshot.
+      // Date window: full calendar month (monthStart to monthEnd).
+      const snapshotMonthStart = new Date(year, month - 1, 1);
       let isQualifying = false;
       if (enrollmentType) {
-        // EnrollmentType field exists — use it strictly
-        isQualifying = !!isCurrent;
+        // EnrollmentType field exists — accept current/active/enrolled
+        const t = enrollmentType.toLowerCase();
+        isQualifying = t === "current" || t === "active" || t === "enrolled";
       } else {
         // EnrollmentType not present — fall back to decline/end check
         const declineReason = extractField(enrollment, "DeclineReason");
         const endDate = extractField(enrollment, "CoverageEndDate", "EndDate", "EndedOn");
-        const snapshotMonthStart = new Date(year, month - 1, 1);
+        // CoverageEndDate < monthStart means enrollment ended before this month
         const isEnded = endDate && new Date(endDate) < snapshotMonthStart;
         isQualifying = !declineReason && !isEnded;
       }

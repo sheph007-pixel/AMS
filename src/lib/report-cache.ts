@@ -98,14 +98,30 @@ function getField(obj: any, ...keys: string[]): string | null {
 /**
  * Monthly Snapshot Enrollment Qualification.
  *
- * Include only enrollments where:
- * - EnrollmentType is "Current" (if field exists), OR no decline reason (if field absent)
- * - Not declined/cancelled/termed (explicit status check)
- * - Effective/start date <= snapshot date (if present)
- * - Coverage end date is null or > snapshot date
- * - Not COBRA (checked separately at plan level, but also here for enrollment-level COBRA)
+ * Each XML file is an as-of snapshot for a given month. The exact RunDate
+ * (e.g. 15th or last day) is not preserved — we only store year + month.
+ * Therefore we treat the snapshot as representing the FULL calendar month
+ * and include any enrollment that was active at any point during that month.
  *
- * This is a point-in-time active enrollment check for the snapshot month.
+ * Date logic:
+ *   monthStart = 1st of snapshot month (e.g. 2023-07-01)
+ *   monthEnd   = last day of snapshot month (e.g. 2023-07-31)
+ *
+ *   An enrollment is active during the month if:
+ *     CoverageStartDate <= monthEnd   (started before or during the month)
+ *     CoverageEndDate   >= monthStart (hasn't ended before the month began)
+ *
+ * Example: July 2023 snapshot (monthStart=Jul 1, monthEnd=Jul 31)
+ *   Starts Jul 10, no end     → include (10 <= 31 ✓, null ✓)
+ *   Starts Jul 10, ends Jul 20 → include (10 <= 31 ✓, 20 >= 1 ✓)
+ *   Starts Jul 10, ends Jun 30 → exclude (10 <= 31 ✓, 30 >= 1? Jun 30 < Jul 1 ✗)
+ *   Starts Aug 5, no end      → exclude (Aug 5 <= Jul 31? ✗)
+ *   Starts Jan 1, ends Jul 15 → include (1 <= 31 ✓, 15 >= 1 ✓)
+ *
+ * Other checks:
+ * - EnrollmentType must be "current"/"active"/"enrolled" (if field exists)
+ * - No DeclineReason
+ * - No COBRA flag
  */
 function qualifyEnrollment(enrollment: any, snapshotMonthStart?: Date): boolean {
   // Explicit type check — reject declined, cancelled, termed, waived
@@ -123,20 +139,22 @@ function qualifyEnrollment(enrollment: any, snapshotMonthStart?: Date): boolean 
   const cobraFlag = getField(enrollment, "COBRAStatus", "IsCOBRA", "CobraIndicator");
   if (cobraFlag && cobraFlag.toLowerCase() !== "false" && cobraFlag !== "0") return false;
 
-  const compareDate = snapshotMonthStart || new Date();
+  // Date window: full calendar month
+  const monthStart = snapshotMonthStart || new Date();
+  const monthEnd = new Date(monthStart.getFullYear(), monthStart.getMonth() + 1, 0); // Last day of month
 
-  // Effective date must be <= snapshot date (if present)
+  // CoverageStartDate must be <= monthEnd (started before or during the month)
   const startDate = getField(enrollment, "CoverageStartDate", "EffectiveDate", "CoverageBeginDate", "StartDate");
   if (startDate) {
     const start = new Date(startDate);
-    if (!isNaN(start.getTime()) && start > compareDate) return false;
+    if (!isNaN(start.getTime()) && start > monthEnd) return false;
   }
 
-  // Coverage end date must be null or > snapshot date
+  // CoverageEndDate must be null or >= monthStart (hasn't ended before the month)
   const endDate = getField(enrollment, "CoverageEndDate", "EndDate", "EndedOn", "TerminationDate");
   if (endDate) {
     const end = new Date(endDate);
-    if (!isNaN(end.getTime()) && end < compareDate) return false;
+    if (!isNaN(end.getTime()) && end < monthStart) return false;
   }
 
   return true;
