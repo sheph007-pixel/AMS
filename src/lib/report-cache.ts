@@ -47,22 +47,6 @@ function qualifyEnrollment(enrollment: any, snapshotMonthStart?: Date): boolean 
   return !declineReason && !isEnded;
 }
 
-function getAllEnrollees(enrollment: any): any[] {
-  const container = enrollment.Enrollees || enrollment.enrollees;
-  if (!container) return [];
-  const list = container.Enrollee || container.enrollee;
-  if (Array.isArray(list)) return list;
-  if (list && typeof list === "object") return [list];
-  return [];
-}
-
-function getEnrollmentField(enrollment: any, enrollee: any, ...keys: string[]): string | null {
-  const top = getField(enrollment, ...keys);
-  if (top) return top;
-  if (enrollee) return getField(enrollee, ...keys);
-  return null;
-}
-
 function resolvePlan(
   enrollment: any,
   planIdMap: Map<string, { carrier: string; planType: string; planName: string }>,
@@ -719,7 +703,7 @@ async function buildProductionDashboard(): Promise<any> {
       for (const enrollment of enrollments) {
         if (!qualifyEnrollment(enrollment, snapshotMonthStart)) continue;
 
-        // Resolve plan from top-level enrollment fields
+        // Resolve plan from enrollment fields
         const enrollPlanId = getField(enrollment, "PlanIdentifier", "PlanId", "PlanID") || "";
         const enrollPlanName = getField(enrollment, "PlanName", "Plan", "Name") || "";
         const planKey = enrollPlanId || enrollPlanName;
@@ -730,111 +714,47 @@ async function buildProductionDashboard(): Promise<any> {
           || null;
         if (!planInfo) continue;
 
-        // Get all enrollees (e.g., employee enrollee, spouse enrollee, child enrollee)
-        // Each enrollee has its own age band, rate, benefit amount, plan name suffix
-        const enrollees = getAllEnrollees(enrollment);
+        // CoverageLevel is directly on the Enrollment element.
+        // Contains "Employee", "Employee + Family", "30-39", "40-49", etc.
+        const coverageLevel = getField(enrollment, "CoverageLevel") || "Employee";
 
-        if (enrollees.length > 0) {
-          // Process each enrollee as a separate grouping row
-          for (const enrollee of enrollees) {
-            const grouping = getField(enrollee,
-              "AgeBand", "CoverageLevel", "Tier", "CoverageTier",
-              "CoverageDescription", "TierName", "RateTier",
-              "Relationship", "RelationshipType"
-            ) || getField(enrollment,
-              "AgeBand", "CoverageLevel", "Tier", "CoverageTier"
-            ) || "Employee";
+        const dedupeKey = `${planKey}||${coverageLevel}`;
+        if (seen.has(dedupeKey)) continue;
+        seen.add(dedupeKey);
 
-            // Build plan name: append relationship suffix if present (e.g., "- Child", "- Spouse")
-            const relationship = getField(enrollee, "Relationship", "RelationshipType", "DependentType");
-            let rowPlanName = planInfo.planName;
-            if (relationship && relationship.toLowerCase() !== "employee" && relationship.toLowerCase() !== "self") {
-              rowPlanName = `${planInfo.planName} - ${relationship}`;
-            }
+        const parseAmt = (raw: string | null) => {
+          if (!raw) return 0;
+          const v = parseFloat(raw);
+          return isNaN(v) || v <= 0 ? 0 : v;
+        };
 
-            const dedupeKey = `${planKey}||${grouping}||${relationship || "self"}`;
-            if (seen.has(dedupeKey)) continue;
-            seen.add(dedupeKey);
+        const planCost = parseAmt(getField(enrollment,
+          "PlanCost", "MonthlyPlanCost", "TotalPremium", "Premium",
+          "MonthlyPremium", "TotalMonthlyPremium", "Cost"));
 
-            const parseAmt = (raw: string | null) => {
-              if (!raw) return 0;
-              const v = parseFloat(raw);
-              return isNaN(v) || v <= 0 ? 0 : v;
-            };
+        const rate = parseAmt(getField(enrollment,
+          "Rate", "EmployeeRate", "MonthlyRate", "PlanRate", "TierRate",
+          "PlanCost", "MonthlyPlanCost", "Premium"));
 
-            const planCost = parseAmt(getEnrollmentField(enrollment, enrollee,
-              "PlanCost", "MonthlyPlanCost", "TotalPremium", "Premium",
-              "MonthlyPremium", "TotalMonthlyPremium", "Cost"));
+        const benefitAmt = parseAmt(getField(enrollment,
+          "BenefitAmount", "CoverageAmount", "Volume", "Amount",
+          "FaceAmount", "BenefitVolume", "ApprovedAmount"));
 
-            const rate = parseAmt(getEnrollmentField(enrollment, enrollee,
-              "Rate", "EmployeeRate", "MonthlyRate", "PlanRate", "TierRate",
-              "PlanCost", "MonthlyPlanCost", "Premium"));
-
-            const benefitAmt = parseAmt(getEnrollmentField(enrollment, enrollee,
-              "BenefitAmount", "CoverageAmount", "Volume", "Amount",
-              "FaceAmount", "BenefitVolume", "ApprovedAmount"));
-
-            const aggKey = `${planInfo.policyNumber || planKey}||${rowPlanName}||${grouping}`;
-            let agg = tierAgg.get(aggKey);
-            if (!agg) {
-              agg = {
-                carrier: planInfo.carrier, planType: planInfo.planType,
-                planName: rowPlanName, policyNumber: planInfo.policyNumber,
-                grouping, rates: [], benefitAmounts: [],
-                lives: 0, totalPremium: 0,
-              };
-              tierAgg.set(aggKey, agg);
-            }
-            agg.lives += 1;
-            agg.totalPremium += planCost;
-            if (rate > 0) agg.rates.push(rate);
-            if (benefitAmt > 0) agg.benefitAmounts.push(benefitAmt);
-          }
-        } else {
-          // No nested enrollees — use enrollment-level fields directly
-          const coverageTier = getField(enrollment,
-            "AgeBand", "RateTier", "TierName",
-            "CoverageLevel", "Tier", "CoverageTier", "CoverageDescription"
-          ) || "Employee";
-
-          const dedupeKey = `${planKey}||${coverageTier}`;
-          if (seen.has(dedupeKey)) continue;
-          seen.add(dedupeKey);
-
-          const parseAmt = (raw: string | null) => {
-            if (!raw) return 0;
-            const v = parseFloat(raw);
-            return isNaN(v) || v <= 0 ? 0 : v;
+        const aggKey = `${planInfo.policyNumber || planKey}||${planInfo.planName}||${coverageLevel}`;
+        let agg = tierAgg.get(aggKey);
+        if (!agg) {
+          agg = {
+            carrier: planInfo.carrier, planType: planInfo.planType,
+            planName: planInfo.planName, policyNumber: planInfo.policyNumber,
+            grouping: coverageLevel, rates: [], benefitAmounts: [],
+            lives: 0, totalPremium: 0,
           };
-
-          const planCost = parseAmt(getField(enrollment,
-            "PlanCost", "MonthlyPlanCost", "TotalPremium", "Premium",
-            "MonthlyPremium", "TotalMonthlyPremium", "Cost"));
-
-          const rate = parseAmt(getField(enrollment,
-            "Rate", "EmployeeRate", "MonthlyRate", "PlanRate", "TierRate",
-            "PlanCost", "MonthlyPlanCost", "Premium"));
-
-          const benefitAmt = parseAmt(getField(enrollment,
-            "BenefitAmount", "CoverageAmount", "Volume", "Amount",
-            "FaceAmount", "BenefitVolume", "ApprovedAmount"));
-
-          const aggKey = `${planInfo.policyNumber || planKey}||${planInfo.planName}||${coverageTier}`;
-          let agg = tierAgg.get(aggKey);
-          if (!agg) {
-            agg = {
-              carrier: planInfo.carrier, planType: planInfo.planType,
-              planName: planInfo.planName, policyNumber: planInfo.policyNumber,
-              grouping: coverageTier, rates: [], benefitAmounts: [],
-              lives: 0, totalPremium: 0,
-            };
-            tierAgg.set(aggKey, agg);
-          }
-          agg.lives += 1;
-          agg.totalPremium += planCost;
-          if (rate > 0) agg.rates.push(rate);
-          if (benefitAmt > 0) agg.benefitAmounts.push(benefitAmt);
+          tierAgg.set(aggKey, agg);
         }
+        agg.lives += 1;
+        agg.totalPremium += planCost;
+        if (rate > 0) agg.rates.push(rate);
+        if (benefitAmt > 0) agg.benefitAmounts.push(benefitAmt);
       }
     }
 
