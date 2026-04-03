@@ -74,10 +74,6 @@ function getMappedField(
   return getField(obj, primaryField, ...hardcodedFallbacks);
 }
 
-// ─── Exported Helpers (used by report-audit.ts) ─────────────────────────────
-
-export { findEnrollments, getField, qualifyEnrollment, getMappedField, loadActiveMappings };
-
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function findEnrollments(meta: any): any[] {
