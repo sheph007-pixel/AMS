@@ -53,6 +53,54 @@ function getAuditStatus(item: QueueItem): "match" | "mismatch" | "pending" {
   return "mismatch";
 }
 
+// ─── Repair Button ───────────────────────────────────────────────────────────
+
+function RepairButton() {
+  const [repairing, setRepairing] = useState(false);
+  const [result, setResult] = useState<{
+    success: boolean;
+    plansRecovered: number;
+    message: string;
+    recoveredPlans?: { period: string; carrier: string | null; planName: string | null; planType: string; enrollees: number }[];
+  } | null>(null);
+
+  async function runRepair() {
+    setRepairing(true);
+    setResult(null);
+    try {
+      const res = await fetch("/api/import/repair", { method: "POST" });
+      const data = await res.json();
+      setResult(data);
+    } catch {
+      setResult({ success: false, plansRecovered: 0, message: "Repair request failed" });
+    } finally {
+      setRepairing(false);
+    }
+  }
+
+  return (
+    <div className="flex items-center gap-2">
+      {result && (
+        <span className={`text-xs ${result.plansRecovered > 0 ? "text-green-600" : "text-bob-text-soft"}`}>
+          {result.message}
+        </span>
+      )}
+      <button
+        onClick={runRepair}
+        disabled={repairing}
+        className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-amber-50 text-amber-700 border border-amber-200 rounded-lg hover:bg-amber-100 transition-colors disabled:opacity-50"
+        title="Scan enrollment data to recover plans dropped by historical import bug"
+      >
+        {repairing ? (
+          <><Loader2 className="w-3 h-3 animate-spin" /> Repairing...</>
+        ) : (
+          <><RefreshCw className="w-3 h-3" /> Repair Missing Plans</>
+        )}
+      </button>
+    </div>
+  );
+}
+
 // ─── Main Page ────────────────────────────────────────────────────────────────
 
 export default function ImportPage() {
@@ -551,21 +599,24 @@ export default function ImportPage() {
       )}
 
       {/* Summary bar */}
-      <div className="flex items-center gap-6 mb-4 text-xs text-bob-text-soft">
-        <span className="flex items-center gap-1.5">
-          <span className="w-3 h-3 rounded bg-bob-green inline-block" />
-          Uploaded ({totalUploaded})
-        </span>
-        <span className="flex items-center gap-1.5">
-          <span className="w-3 h-3 rounded bg-bob-bg border border-bob-border inline-block" />
-          Available ({totalCells - totalUploaded})
-        </span>
-        {suspiciousCount > 0 && (
+      <div className="flex items-center justify-between mb-4">
+        <div className="flex items-center gap-6 text-xs text-bob-text-soft">
           <span className="flex items-center gap-1.5">
-            <span className="w-3 h-3 rounded bg-red-100 border border-red-300 inline-block" />
-            Needs Review ({suspiciousCount})
+            <span className="w-3 h-3 rounded bg-bob-green inline-block" />
+            Uploaded ({totalUploaded})
           </span>
-        )}
+          <span className="flex items-center gap-1.5">
+            <span className="w-3 h-3 rounded bg-bob-bg border border-bob-border inline-block" />
+            Available ({totalCells - totalUploaded})
+          </span>
+          {suspiciousCount > 0 && (
+            <span className="flex items-center gap-1.5">
+              <span className="w-3 h-3 rounded bg-red-100 border border-red-300 inline-block" />
+              Needs Review ({suspiciousCount})
+            </span>
+          )}
+        </div>
+        <RepairButton />
       </div>
 
       {/* Year/Month Grid */}
