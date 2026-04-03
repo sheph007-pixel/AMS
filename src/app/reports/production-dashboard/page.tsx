@@ -621,7 +621,18 @@ export default function ProductionDashboardPage() {
                   ))}
                   {paged.length === 0 && (
                     <tr><td colSpan={columns.length} className="px-4 py-12 text-center text-bob-text-soft">
-                      {hasFilters ? "No rows match your filters" : "No production data available"}
+                      {hasFilters ? (
+                        filterCarrier && filtered.length === 0 ? (
+                          <div className="space-y-2">
+                            <p className="font-medium text-bob-text">No data found for {filterCarrier}</p>
+                            <p className="text-xs text-bob-text-soft max-w-md mx-auto">
+                              This may be due to historical data not being stored before the
+                              excluded-plan tracking update. Re-importing affected months from
+                              the Data Upload page may resolve this.
+                            </p>
+                          </div>
+                        ) : "No rows match your filters"
+                      ) : "No production data available"}
                     </td></tr>
                   )}
                 </tbody>

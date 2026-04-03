@@ -16,11 +16,16 @@ interface DashRow {
   feeRateDisplay: string; income: number; coverageType: string;
 }
 
+interface CarrierBreakdown {
+  carrier: string; rawPlans: number; excludedPlans: number;
+}
+
 interface RawMonth {
   period: string; year: number; month: number;
   rawCompanies: number; rawEmployees: number;
   activeEmployees: number; termedEmployees: number;
   rawPlans: number; excludedPlans: number;
+  carriers?: CarrierBreakdown[];
 }
 
 interface MonthSummary {
@@ -28,6 +33,7 @@ interface MonthSummary {
   // Raw (from database)
   rawCompanies: number;
   rawEmployees: number;
+  rawPlans: number;
   // Filtered (from dashboard cache)
   filteredActiveEmployees: number;
   filteredPremium: number;
@@ -39,9 +45,9 @@ interface MonthSummary {
   companyList: string[];
 }
 
-type SortKey = "period" | "rawCompanies" | "rawEmployees" | "filteredActiveEmployees" | "filteredPremium" | "filteredEstIncome";
+type SortKey = "period" | "rawCompanies" | "rawEmployees" | "rawPlans" | "excludedPlans" | "filteredActiveEmployees" | "filteredPremium" | "filteredEstIncome";
 type SortDir = "asc" | "desc";
-type DrillType = "companies" | "employees" | "premium" | "income";
+type DrillType = "companies" | "employees" | "premium" | "income" | "carriers";
 interface DrillState { period: string; type: DrillType }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -115,6 +121,7 @@ export default function AuditPage() {
         month: raw?.month || parseInt(period.split("-")[1]),
         rawCompanies: raw?.rawCompanies || 0,
         rawEmployees: raw?.rawEmployees || 0,
+        rawPlans: raw?.rawPlans || 0,
         filteredActiveEmployees: filt?.lives || 0,
         filteredPremium: Math.round((filt?.premium || 0) * 100) / 100,
         filteredEstIncome: Math.round((filt?.income || 0) * 100) / 100,
@@ -150,6 +157,13 @@ export default function AuditPage() {
 
   const drillData = useMemo(() => {
     if (!drill) return null;
+
+    if (drill.type === "carriers") {
+      const raw = rawMonths.find(r => r.period === drill.period);
+      const carrierRows = raw?.carriers || [];
+      return { title: "Carriers — Raw Plan Breakdown", rows: carrierRows, type: "carriers" as const };
+    }
+
     const monthRows = dashRows.filter(r => r.month === drill.period);
 
     if (drill.type === "companies") {
@@ -186,12 +200,15 @@ export default function AuditPage() {
         method: r.incomeMethod, rate: r.feeRateDisplay, income: r.income || 0,
       })).sort((a, b) => b.income - a.income),
     };
-  }, [drill, dashRows]);
+  }, [drill, dashRows, rawMonths]);
 
   function exportDrill() {
     if (!drillData || !drill) return;
     const p = drill.period;
-    if (drillData.type === "companies") {
+    if (drillData.type === "carriers") {
+      const lines = ["Carrier,Raw Plans,Excluded Plans", ...drillData.rows.map((r: any) => `"${r.carrier}",${r.rawPlans},${r.excludedPlans}`)];
+      downloadCSV(lines.join("\n"), `audit-carriers-${p}.csv`);
+    } else if (drillData.type === "companies") {
       const lines = ["Company,Code,Plans,Lives,Premium,Est. Income", ...drillData.rows.map((r: any) => `"${r.name}","${r.code}",${r.plans},${r.lives},${r.premium.toFixed(2)},${r.income.toFixed(2)}`)];
       downloadCSV(lines.join("\n"), `audit-companies-${p}.csv`);
     } else if (drillData.type === "employees") {
@@ -217,6 +234,9 @@ export default function AuditPage() {
     );
   }
 
+  // Identify months potentially affected by historical import bug
+  const affectedMonths = rawMonths.filter(m => m.excludedPlans === 0 && m.rawPlans > 0);
+
   return (
     <div>
       <div className="mb-6">
@@ -227,10 +247,21 @@ export default function AuditPage() {
       </div>
 
       {/* Note about historical data */}
-      {rawMonths.some(m => m.excludedPlans === 0 && m.rawPlans > 0) && (
+      {affectedMonths.length > 0 && (
         <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 text-xs text-amber-800 mb-4">
-          Historical months imported before this update may show 0 excluded plans because excluded plans were previously dropped at import time.
-          Re-import affected months to recover full raw plan data.
+          <p className="font-semibold mb-1">Historical data gap detected</p>
+          <p>
+            {affectedMonths.length} month(s) show 0 excluded plans despite having stored plans.
+            This indicates they were imported before the excluded-plan tracking update, so excluded
+            plans were dropped at import time rather than being flagged.
+            Re-import affected months to recover full raw plan data.
+          </p>
+          <p className="mt-1 text-amber-600">
+            Affected: {affectedMonths.map(m => {
+              const mi = m.month >= 1 && m.month <= 12 ? MONTHS[m.month] : String(m.month);
+              return `${mi} ${m.year}`;
+            }).join(", ")}
+          </p>
         </div>
       )}
 
@@ -244,6 +275,8 @@ export default function AuditPage() {
                   ["period", "Month", "text-left"],
                   ["rawCompanies", "Raw Companies", "text-right"],
                   ["rawEmployees", "Raw Employees", "text-right"],
+                  ["rawPlans", "Raw Plans", "text-right"],
+                  ["excludedPlans", "Excluded Plans", "text-right"],
                   ["filteredActiveEmployees", "Active Employees", "text-right"],
                   ["filteredPremium", "Premium", "text-right"],
                   ["filteredEstIncome", "Est. Income", "text-right"],
@@ -272,6 +305,16 @@ export default function AuditPage() {
                     )}
                   </td>
                   <td className="px-4 py-3 text-right">
+                    <button onClick={() => setDrill({ period: m.period, type: "carriers" })}
+                      className="text-bob-purple hover:underline font-medium">{fmtNum(m.rawPlans)}</button>
+                  </td>
+                  <td className={`px-4 py-3 text-right ${m.excludedPlans === 0 && m.rawPlans > 0 ? "text-amber-600 font-medium" : "text-bob-text"}`}>
+                    {fmtNum(m.excludedPlans)}
+                    {m.excludedPlans === 0 && m.rawPlans > 0 && (
+                      <span className="text-[10px] text-amber-500 ml-1" title="May indicate historical data gap">*</span>
+                    )}
+                  </td>
+                  <td className="px-4 py-3 text-right">
                     <button onClick={() => setDrill({ period: m.period, type: "employees" })}
                       className="text-bob-purple hover:underline font-medium">{fmtNum(m.filteredActiveEmployees)}</button>
                   </td>
@@ -286,7 +329,7 @@ export default function AuditPage() {
                 </tr>
               ))}
               {sorted.length === 0 && (
-                <tr><td colSpan={6} className="px-4 py-12 text-center text-bob-text-soft">No data available. Import XML data first.</td></tr>
+                <tr><td colSpan={8} className="px-4 py-12 text-center text-bob-text-soft">No data available. Import XML data first.</td></tr>
               )}
             </tbody>
           </table>
@@ -311,6 +354,29 @@ export default function AuditPage() {
               </div>
             </div>
             <div className="overflow-auto flex-1 p-4">
+              {drillData.type === "carriers" && (
+                <table className="w-full text-xs">
+                  <thead><tr className="border-b border-bob-border">
+                    <th className="text-left py-2 px-2 font-semibold text-gray-500">Carrier</th>
+                    <th className="text-right py-2 px-2 font-semibold text-gray-500">Raw Plans</th>
+                    <th className="text-right py-2 px-2 font-semibold text-gray-500">Excluded Plans</th>
+                    <th className="text-right py-2 px-2 font-semibold text-gray-500">Active Plans</th>
+                  </tr></thead>
+                  <tbody className="divide-y divide-gray-100">
+                    {drillData.rows.map((r: any, i: number) => (
+                      <tr key={i} className="hover:bg-gray-50">
+                        <td className="py-2 px-2 font-medium">{r.carrier}</td>
+                        <td className="py-2 px-2 text-right">{r.rawPlans}</td>
+                        <td className="py-2 px-2 text-right">{r.excludedPlans}</td>
+                        <td className="py-2 px-2 text-right font-medium">{r.rawPlans - r.excludedPlans}</td>
+                      </tr>
+                    ))}
+                    {drillData.rows.length === 0 && (
+                      <tr><td colSpan={4} className="py-4 text-center text-bob-text-soft">No carrier data for this month</td></tr>
+                    )}
+                  </tbody>
+                </table>
+              )}
               {drillData.type === "companies" && (
                 <table className="w-full text-xs">
                   <thead><tr className="border-b border-bob-border">
