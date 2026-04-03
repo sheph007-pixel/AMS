@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useMemo, useRef, useCallback } from "react";
+import React, { useEffect, useState, useMemo, useRef, useCallback } from "react";
 import {
   Download, Search, ArrowUpDown, ArrowUp, ArrowDown,
   Settings2, Save, X, ChevronDown, ShieldCheck, AlertTriangle, Loader2,
@@ -289,8 +289,8 @@ function AuditPanel() {
             </thead>
             <tbody className="divide-y divide-gray-100">
               {data.months.map(m => (
-                <>
-                  <tr key={m.period}
+                <React.Fragment key={m.period}>
+                  <tr
                     onClick={() => setExpandedMonth(expandedMonth === m.period ? null : m.period)}
                     className="hover:bg-gray-50 cursor-pointer transition-colors">
                     <td className="px-4 py-2.5 font-medium text-bob-text">{MONTH_NAMES[m.month]} {m.year}</td>
@@ -309,7 +309,7 @@ function AuditPanel() {
                     </td>
                   </tr>
                   {expandedMonth === m.period && (
-                    <tr key={`${m.period}-detail`}>
+                    <tr>
                       <td colSpan={7} className="px-4 py-3 bg-gray-50">
                         <div className="space-y-1">
                           {m.checks.map((c, i) => (
@@ -325,7 +325,7 @@ function AuditPanel() {
                       </td>
                     </tr>
                   )}
-                </>
+                </React.Fragment>
               ))}
             </tbody>
           </table>
