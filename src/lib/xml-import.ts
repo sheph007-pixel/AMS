@@ -263,7 +263,12 @@ async function importWithMappings(
       const carrier = extractMapped(plan, "Carrier");
       const planName = extractMapped(plan, "PlanName", "Name");
 
-      if (isExcluded({ carrier, planName, planType, groupName }, exclusionRules)) continue;
+      let planExcluded = false;
+      let excludeReason: string | null = null;
+      if (isExcluded({ carrier, planName, planType, groupName }, exclusionRules)) {
+        planExcluded = true;
+        excludeReason = "exclusion_rule";
+      }
 
       const planIdentifier = extractMapped(plan, "PlanIdentifier", "PlanId", "PlanID");
       const planLevelCost = parseFloatSafe(
@@ -279,6 +284,7 @@ async function importWithMappings(
           clientSnapshotId: snapshot.id, planType, carrier, planName,
           eligible: eligibleCount, enrollees: enrolleeCount, premium,
           metadata: JSON.stringify(collectAllFields(plan)),
+          excluded: planExcluded, excludeReason,
         },
       });
       result.benefitPlansCreated++;
@@ -442,16 +448,20 @@ async function importLegacy(
     // --- Count active enrolled per plan + sum enrollment-level MonthlyPlanCost ---
     const { enrolled: enrolledByPlan, eligible: eligibleByPlan, premiumByPlan } = countByPlan(employees, resolvedYear, resolvedMonth ?? 1);
 
-    // --- Import benefit plans (filtered by exclusion rules) ---
+    // --- Import ALL benefit plans (mark excluded, never skip) ---
     for (const plan of plans) {
       const planType = derivePlanType(plan);
       const carrier = extractField(plan, "Carrier");
       const planName = extractField(plan, "PlanName", "Name");
 
-      // Check exclusion rules — skip if any rule matches
+      // Determine exclusion status — store the plan either way
+      let planExcluded = false;
+      let excludeReason: string | null = null;
       if (isExcluded({ carrier, planName, planType, groupName }, exclusionRules)) {
-        continue;
+        planExcluded = true;
+        excludeReason = "exclusion_rule";
       }
+
       const planIdentifier = extractField(plan, "PlanIdentifier");
 
       // Plan-level cost (fallback)
@@ -486,6 +496,8 @@ async function importLegacy(
           enrollees: enrolleeCount,
           premium,
           metadata: JSON.stringify(collectAllFields(plan)),
+          excluded: planExcluded,
+          excludeReason,
         },
       });
       result.benefitPlansCreated++;

@@ -62,6 +62,10 @@ model BenefitPlan {
   premium     Float?
   metadata    String? /// Raw plan data as JSON
 
+  /// Exclusion tracking — plan is stored but may be excluded from reports
+  excluded       Boolean @default(false) /// true = excluded at import time
+  excludeReason  String? /// Why excluded: "exclusion_rule", "cobra", etc.
+
   clientSnapshot ClientSnapshot @relation(fields: [clientSnapshotId], references: [id], onDelete: Cascade)
 
   @@index([clientSnapshotId])

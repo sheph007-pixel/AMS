@@ -16,16 +16,31 @@ interface DashRow {
   feeRateDisplay: string; income: number; coverageType: string;
 }
 
+interface RawMonth {
+  period: string; year: number; month: number;
+  rawCompanies: number; rawEmployees: number;
+  activeEmployees: number; termedEmployees: number;
+  rawPlans: number; excludedPlans: number;
+}
+
 interface MonthSummary {
   period: string; year: number; month: number;
-  companies: number; activeEmployees: number;
-  premium: number; estimatedIncome: number;
+  // Raw (from database)
+  rawCompanies: number;
+  rawEmployees: number;
+  // Filtered (from dashboard cache)
+  filteredActiveEmployees: number;
+  filteredPremium: number;
+  filteredEstIncome: number;
+  // Excluded
+  excludedEmployees: number;
+  excludedPlans: number;
+  // Detail
   companyList: string[];
 }
 
-type SortKey = "period" | "companies" | "activeEmployees" | "premium" | "estimatedIncome";
+type SortKey = "period" | "rawCompanies" | "rawEmployees" | "filteredActiveEmployees" | "filteredPremium" | "filteredEstIncome";
 type SortDir = "asc" | "desc";
-
 type DrillType = "companies" | "employees" | "premium" | "income";
 interface DrillState { period: string; type: DrillType }
 
@@ -46,7 +61,8 @@ function downloadCSV(content: string, filename: string) {
 // ─── Page ───────────────────────────────────────────────────────────────────
 
 export default function AuditPage() {
-  const [allRows, setAllRows] = useState<DashRow[]>([]);
+  const [dashRows, setDashRows] = useState<DashRow[]>([]);
+  const [rawMonths, setRawMonths] = useState<RawMonth[]>([]);
   const [loading, setLoading] = useState(true);
   const [sortKey, setSortKey] = useState<SortKey>("period");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
@@ -54,51 +70,60 @@ export default function AuditPage() {
 
   const loadData = useCallback(() => {
     setLoading(true);
-    fetch("/api/reports/production-dashboard")
-      .then(r => { if (!r.ok) throw new Error("Failed"); return r.json(); })
-      .then(data => setAllRows(data.rows || []))
+    Promise.all([
+      fetch("/api/reports/production-dashboard").then(r => r.ok ? r.json() : { rows: [] }),
+      fetch("/api/reports/audit-raw").then(r => r.ok ? r.json() : []),
+    ])
+      .then(([dashData, rawData]) => {
+        setDashRows(dashData.rows || []);
+        setRawMonths(Array.isArray(rawData) ? rawData : []);
+      })
       .catch(() => {})
       .finally(() => setLoading(false));
   }, []);
 
   useEffect(() => { loadData(); }, [loadData]);
 
-  // ── Aggregate by month ────────────────────────────────────────────
+  // ── Build monthly summaries merging raw + filtered ────────────────
 
   const months: MonthSummary[] = useMemo(() => {
-    const map = new Map<string, { year: number; month: number; clients: Set<string>; employees: Set<string>; premium: number; income: number }>();
-
-    for (const r of allRows) {
-      const p = r.month; // period string like "2024-07"
-      if (!p) continue;
-      let m = map.get(p);
-      if (!m) {
-        m = { year: r.year, month: r.monthNum, clients: new Set(), employees: new Set(), premium: 0, income: 0 };
-        map.set(p, m);
-      }
+    // Filtered data from dashboard cache
+    const filtered = new Map<string, { clients: Set<string>; lives: number; premium: number; income: number }>();
+    for (const r of dashRows) {
+      if (!r.month) continue;
+      let m = filtered.get(r.month);
+      if (!m) { m = { clients: new Set(), lives: 0, premium: 0, income: 0 }; filtered.set(r.month, m); }
       m.clients.add(r.clientCode || r.clientName);
-      // lives = enrollment count for this plan+tier row
+      m.lives += r.lives || 0;
       m.premium += r.monthlyPremium || 0;
       m.income += r.income || 0;
     }
 
-    // Active employees: count distinct clientCode per month from the rows
-    // (lives are per-plan-tier, so we sum them for total active employees)
-    const livesByMonth = new Map<string, number>();
-    for (const r of allRows) {
-      if (!r.month) continue;
-      livesByMonth.set(r.month, (livesByMonth.get(r.month) || 0) + (r.lives || 0));
-    }
+    // Raw data from database
+    const rawMap = new Map(rawMonths.map(r => [r.period, r]));
 
-    return Array.from(map.entries()).map(([period, d]) => ({
-      period, year: d.year, month: d.month,
-      companies: d.clients.size,
-      activeEmployees: livesByMonth.get(period) || 0,
-      premium: Math.round(d.premium * 100) / 100,
-      estimatedIncome: Math.round(d.income * 100) / 100,
-      companyList: Array.from(d.clients).sort(),
-    }));
-  }, [allRows]);
+    // Merge: use all periods from either source
+    const allPeriods = new Set([...filtered.keys(), ...rawMap.keys()]);
+
+    return Array.from(allPeriods).map(period => {
+      const raw = rawMap.get(period);
+      const filt = filtered.get(period);
+
+      return {
+        period,
+        year: raw?.year || parseInt(period.split("-")[0]),
+        month: raw?.month || parseInt(period.split("-")[1]),
+        rawCompanies: raw?.rawCompanies || 0,
+        rawEmployees: raw?.rawEmployees || 0,
+        filteredActiveEmployees: filt?.lives || 0,
+        filteredPremium: Math.round((filt?.premium || 0) * 100) / 100,
+        filteredEstIncome: Math.round((filt?.income || 0) * 100) / 100,
+        excludedEmployees: raw?.termedEmployees || 0,
+        excludedPlans: raw?.excludedPlans || 0,
+        companyList: filt ? Array.from(filt.clients).sort() : [],
+      };
+    });
+  }, [dashRows, rawMonths]);
 
   // ── Sort ──────────────────────────────────────────────────────────
 
@@ -121,21 +146,11 @@ export default function AuditPage() {
     return sortDir === "asc" ? <ArrowUp className="w-3 h-3 text-bob-purple ml-0.5 inline" /> : <ArrowDown className="w-3 h-3 text-bob-purple ml-0.5 inline" />;
   }
 
-  // ── Totals ────────────────────────────────────────────────────────
-
-  const totals = useMemo(() => ({
-    months: months.length,
-    companies: new Set(allRows.map(r => r.clientCode || r.clientName)).size,
-    activeEmployees: months.reduce((s, m) => s + m.activeEmployees, 0),
-    premium: Math.round(months.reduce((s, m) => s + m.premium, 0) * 100) / 100,
-    estimatedIncome: Math.round(months.reduce((s, m) => s + m.estimatedIncome, 0) * 100) / 100,
-  }), [months, allRows]);
-
-  // ── Drill-down data ───────────────────────────────────────────────
+  // ── Drill-down ────────────────────────────────────────────────────
 
   const drillData = useMemo(() => {
     if (!drill) return null;
-    const monthRows = allRows.filter(r => r.month === drill.period);
+    const monthRows = dashRows.filter(r => r.month === drill.period);
 
     if (drill.type === "companies") {
       const compMap = new Map<string, { name: string; code: string; plans: number; lives: number; premium: number; income: number }>();
@@ -147,9 +162,7 @@ export default function AuditPage() {
       }
       return { title: "Companies", rows: Array.from(compMap.values()).sort((a, b) => b.premium - a.premium), type: "companies" as const };
     }
-
     if (drill.type === "employees") {
-      // Group by client → show lives per client (employee-level detail not available without re-parsing metadata)
       const clientLives = new Map<string, { name: string; lives: number; plans: number }>();
       for (const r of monthRows) {
         let c = clientLives.get(r.clientName);
@@ -158,51 +171,38 @@ export default function AuditPage() {
       }
       return { title: "Active Employees by Client", rows: Array.from(clientLives.values()).sort((a, b) => b.lives - a.lives), type: "employees" as const };
     }
-
     if (drill.type === "premium") {
       return {
-        title: "Premium Detail",
+        title: "Premium Detail", type: "premium" as const,
         rows: monthRows.filter(r => (r.monthlyPremium || 0) > 0).map(r => ({
-          client: r.clientName, carrier: r.carrier, plan: r.planName,
-          grouping: r.grouping, lives: r.lives || 0, premium: r.monthlyPremium || 0,
+          client: r.clientName, carrier: r.carrier, plan: r.planName, grouping: r.grouping, lives: r.lives || 0, premium: r.monthlyPremium || 0,
         })).sort((a, b) => b.premium - a.premium),
-        type: "premium" as const,
       };
     }
-
-    // income
     return {
-      title: "Estimated Income Detail",
+      title: "Estimated Income Detail", type: "income" as const,
       rows: monthRows.filter(r => (r.income || 0) > 0).map(r => ({
-        client: r.clientName, carrier: r.carrier, plan: r.planName,
-        grouping: r.grouping, lives: r.lives || 0, premium: r.monthlyPremium || 0,
+        client: r.clientName, carrier: r.carrier, plan: r.planName, grouping: r.grouping, lives: r.lives || 0, premium: r.monthlyPremium || 0,
         method: r.incomeMethod, rate: r.feeRateDisplay, income: r.income || 0,
       })).sort((a, b) => b.income - a.income),
-      type: "income" as const,
     };
-  }, [drill, allRows]);
-
-  // ── Export drill-down ─────────────────────────────────────────────
+  }, [drill, dashRows]);
 
   function exportDrill() {
     if (!drillData || !drill) return;
-    const period = drill.period;
+    const p = drill.period;
     if (drillData.type === "companies") {
-      const hdr = "Company,Code,Plans,Lives,Premium,Est. Income";
-      const lines = drillData.rows.map((r: any) => `"${r.name}","${r.code}",${r.plans},${r.lives},${r.premium.toFixed(2)},${r.income.toFixed(2)}`);
-      downloadCSV([hdr, ...lines].join("\n"), `audit-companies-${period}.csv`);
+      const lines = ["Company,Code,Plans,Lives,Premium,Est. Income", ...drillData.rows.map((r: any) => `"${r.name}","${r.code}",${r.plans},${r.lives},${r.premium.toFixed(2)},${r.income.toFixed(2)}`)];
+      downloadCSV(lines.join("\n"), `audit-companies-${p}.csv`);
     } else if (drillData.type === "employees") {
-      const hdr = "Client,Active Employees,Plan Rows";
-      const lines = drillData.rows.map((r: any) => `"${r.name}",${r.lives},${r.plans}`);
-      downloadCSV([hdr, ...lines].join("\n"), `audit-employees-${period}.csv`);
+      const lines = ["Client,Active Employees,Plan Rows", ...drillData.rows.map((r: any) => `"${r.name}",${r.lives},${r.plans}`)];
+      downloadCSV(lines.join("\n"), `audit-employees-${p}.csv`);
     } else if (drillData.type === "premium") {
-      const hdr = "Client,Carrier,Plan,Grouping,Lives,Premium";
-      const lines = drillData.rows.map((r: any) => `"${r.client}","${r.carrier}","${r.plan}","${r.grouping}",${r.lives},${r.premium.toFixed(2)}`);
-      downloadCSV([hdr, ...lines].join("\n"), `audit-premium-${period}.csv`);
+      const lines = ["Client,Carrier,Plan,Grouping,Lives,Premium", ...drillData.rows.map((r: any) => `"${r.client}","${r.carrier}","${r.plan}","${r.grouping}",${r.lives},${r.premium.toFixed(2)}`)];
+      downloadCSV(lines.join("\n"), `audit-premium-${p}.csv`);
     } else {
-      const hdr = "Client,Carrier,Plan,Grouping,Lives,Premium,Method,Rate,Est. Income";
-      const lines = drillData.rows.map((r: any) => `"${r.client}","${r.carrier}","${r.plan}","${r.grouping}",${r.lives},${r.premium.toFixed(2)},"${r.method}","${r.rate}",${r.income.toFixed(2)}`);
-      downloadCSV([hdr, ...lines].join("\n"), `audit-income-${period}.csv`);
+      const lines = ["Client,Carrier,Plan,Grouping,Lives,Premium,Method,Rate,Est. Income", ...drillData.rows.map((r: any) => `"${r.client}","${r.carrier}","${r.plan}","${r.grouping}",${r.lives},${r.premium.toFixed(2)},"${r.method}","${r.rate}",${r.income.toFixed(2)}`)];
+      downloadCSV(lines.join("\n"), `audit-income-${p}.csv`);
     }
   }
 
@@ -222,25 +222,17 @@ export default function AuditPage() {
       <div className="mb-6">
         <h1 className="text-3xl font-bold tracking-tight text-bob-text">Monthly Audit</h1>
         <p className="text-bob-text-soft mt-1">
-          Monthly snapshot totals from the Production Report — {totals.months} months, {totals.companies} companies
+          Raw uploaded data vs filtered production report — {months.length} months
         </p>
       </div>
 
-      {/* Summary */}
-      <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mb-6">
-        {[
-          { label: "Months", value: fmtNum(totals.months) },
-          { label: "Companies", value: fmtNum(totals.companies) },
-          { label: "Total Lives", value: fmtNum(totals.activeEmployees) },
-          { label: "Total Premium", value: fmtCur(totals.premium) },
-          { label: "Total Est. Income", value: fmtCur(totals.estimatedIncome) },
-        ].map(c => (
-          <div key={c.label} className="bg-white rounded-xl border border-bob-border p-4">
-            <p className="text-xs font-medium text-bob-text-soft uppercase tracking-wide">{c.label}</p>
-            <p className="text-xl font-bold text-bob-text mt-1">{c.value}</p>
-          </div>
-        ))}
-      </div>
+      {/* Note about historical data */}
+      {rawMonths.some(m => m.excludedPlans === 0 && m.rawPlans > 0) && (
+        <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 text-xs text-amber-800 mb-4">
+          Historical months imported before this update may show 0 excluded plans because excluded plans were previously dropped at import time.
+          Re-import affected months to recover full raw plan data.
+        </div>
+      )}
 
       {/* Monthly Table */}
       <div className="bg-white rounded-2xl border border-bob-border overflow-hidden mb-6">
@@ -250,10 +242,11 @@ export default function AuditPage() {
               <tr className="bg-gray-50 border-b border-bob-border">
                 {([
                   ["period", "Month", "text-left"],
-                  ["companies", "Companies", "text-right"],
-                  ["activeEmployees", "Active Employees", "text-right"],
-                  ["premium", "Premium", "text-right"],
-                  ["estimatedIncome", "Est. Income", "text-right"],
+                  ["rawCompanies", "Raw Companies", "text-right"],
+                  ["rawEmployees", "Raw Employees", "text-right"],
+                  ["filteredActiveEmployees", "Active Employees", "text-right"],
+                  ["filteredPremium", "Premium", "text-right"],
+                  ["filteredEstIncome", "Est. Income", "text-right"],
                 ] as [SortKey, string, string][]).map(([key, label, align]) => (
                   <th key={key} onClick={() => handleSort(key)}
                     className={`px-4 py-3 ${align} text-xs font-semibold text-gray-500 uppercase tracking-wider cursor-pointer hover:text-bob-purple transition-colors select-none whitespace-nowrap`}>
@@ -270,24 +263,30 @@ export default function AuditPage() {
                   </td>
                   <td className="px-4 py-3 text-right">
                     <button onClick={() => setDrill({ period: m.period, type: "companies" })}
-                      className="text-bob-purple hover:underline font-medium">{m.companies}</button>
+                      className="text-bob-purple hover:underline font-medium">{m.rawCompanies}</button>
+                  </td>
+                  <td className="px-4 py-3 text-right text-bob-text">
+                    {fmtNum(m.rawEmployees)}
+                    {m.excludedEmployees > 0 && (
+                      <span className="text-[10px] text-bob-text-soft ml-1">({fmtNum(m.excludedEmployees)} termed)</span>
+                    )}
                   </td>
                   <td className="px-4 py-3 text-right">
                     <button onClick={() => setDrill({ period: m.period, type: "employees" })}
-                      className="text-bob-purple hover:underline font-medium">{fmtNum(m.activeEmployees)}</button>
+                      className="text-bob-purple hover:underline font-medium">{fmtNum(m.filteredActiveEmployees)}</button>
                   </td>
                   <td className="px-4 py-3 text-right">
                     <button onClick={() => setDrill({ period: m.period, type: "premium" })}
-                      className="text-bob-purple hover:underline font-medium">{fmtCur(m.premium)}</button>
+                      className="text-bob-purple hover:underline font-medium">{fmtCur(m.filteredPremium)}</button>
                   </td>
                   <td className="px-4 py-3 text-right">
                     <button onClick={() => setDrill({ period: m.period, type: "income" })}
-                      className="text-bob-purple hover:underline font-medium">{fmtCur(m.estimatedIncome)}</button>
+                      className="text-bob-purple hover:underline font-medium">{fmtCur(m.filteredEstIncome)}</button>
                   </td>
                 </tr>
               ))}
               {sorted.length === 0 && (
-                <tr><td colSpan={5} className="px-4 py-12 text-center text-bob-text-soft">No data available. Import XML data first.</td></tr>
+                <tr><td colSpan={6} className="px-4 py-12 text-center text-bob-text-soft">No data available. Import XML data first.</td></tr>
               )}
             </tbody>
           </table>

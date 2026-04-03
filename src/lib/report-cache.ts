@@ -230,7 +230,7 @@ async function processAllSnapshots(): Promise<ProcessedSnapshot[]> {
       id: true, year: true, month: true, sicCode: true, state: true, importedAt: true,
       client: { select: { groupId: true, groupName: true } },
       benefitPlans: {
-        select: { carrier: true, planType: true, planName: true, premium: true, enrollees: true, eligible: true },
+        select: { carrier: true, planType: true, planName: true, premium: true, enrollees: true, eligible: true, excluded: true },
       },
     },
     orderBy: [{ year: "asc" }, { month: "asc" }],
@@ -244,8 +244,8 @@ async function processAllSnapshots(): Promise<ProcessedSnapshot[]> {
     const agg = new Map<string, AggEntry>();
 
     for (const bp of snap.benefitPlans) {
+      if (bp.excluded) continue; // Marked excluded at import time
       if (isExcluded({ planName: bp.planName, planType: bp.planType }, nonCarrierRules)) continue;
-      // Explicit COBRA exclusion — matches dashboard behavior
       if (bp.planType?.toLowerCase() === "cobra") continue;
 
       const carrier = bp.carrier || "Unspecified Carrier";
@@ -760,7 +760,7 @@ async function buildProductionDashboard(): Promise<any> {
       id: true, year: true, month: true,
       client: { select: { groupId: true, groupName: true } },
       benefitPlans: {
-        select: { planType: true, carrier: true, planName: true, metadata: true },
+        select: { planType: true, carrier: true, planName: true, metadata: true, excluded: true },
       },
     },
     orderBy: [{ year: "asc" }, { month: "asc" }],
@@ -788,6 +788,7 @@ async function buildProductionDashboard(): Promise<any> {
     let hasPlans = false;
 
     for (const bp of snap.benefitPlans) {
+      if (bp.excluded) continue; // Marked excluded at import time
       if (isExcluded({ planName: bp.planName, planType: bp.planType }, nonCarrierRules)) continue;
       if (bp.planType?.toLowerCase() === "cobra") continue;
       // Carrier exclusion from CarrierSetting (single source of truth for carriers)
