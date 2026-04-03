@@ -114,11 +114,12 @@ export async function POST() {
               || null;
 
             // Try to determine plan type
-            const planType = derivePlanTypeFromEnrollment(enrollment, planName);
+            const effectivePlanName = planName || planId;
+            const planType = derivePlanTypeFromEnrollment(enrollment, effectivePlanName);
 
             info = {
               planIdentifier: planId,
-              planName: planName,
+              planName: effectivePlanName,
               carrier,
               planType,
               enrolledCount: 0,
@@ -127,6 +128,13 @@ export async function POST() {
               enrollmentSamples: [],
             };
             discoveredPlans.set(planKey, info);
+          }
+
+          // Update planName if we discover it from a later enrollment
+          if (!info.planName && planName) info.planName = planName;
+          if (!info.carrier) {
+            const foundCarrier = getField(enrollment, "Carrier", "CarrierName", "InsuranceCarrier");
+            if (foundCarrier) info.carrier = foundCarrier;
           }
 
           // Count eligible (any enrollment reference)
