@@ -526,7 +526,15 @@ export default function ProductionDashboardPage() {
             <FilterDropdown label="Month" value={filterMonth} options={filterOptions.periods} onChange={setFilterMonth} allLabel="All Months" />
             <FilterDropdown label="Fiscal Year" value={filterYear} options={filterOptions.fiscalYears.map(String)} onChange={setFilterYear} allLabel="All Years" />
             <FilterDropdown label="Client" value={filterClient} options={filterOptions.clients} onChange={setFilterClient} allLabel="All Clients" />
-            <FilterDropdown label="Carrier" value={filterCarrier} options={filterOptions.carriers} onChange={setFilterCarrier} allLabel="All Carriers" />
+            <FilterDropdown label="Carrier" value={filterCarrier}
+              options={
+                // All active (non-excluded) carriers from CarrierSettings + any in report data
+                Array.from(new Set([
+                  ...carrierSettings.filter(cs => !cs.excluded).map(cs => cs.carrierName),
+                  ...(filterOptions.carriers || []),
+                ])).sort()
+              }
+              onChange={setFilterCarrier} allLabel="All Carriers" />
             <FilterDropdown label="Policy Number" value={filterPolicy} options={filterOptions.policyNumbers} onChange={setFilterPolicy} allLabel="All Policies" />
             <FilterDropdown label="Coverage Type" value={filterCoverage} options={filterOptions.coverageTypes} onChange={setFilterCoverage} allLabel="All Types" />
             <div className="flex flex-col gap-1">
