@@ -55,48 +55,159 @@ function getAuditStatus(item: QueueItem): "match" | "mismatch" | "pending" {
 
 // ─── Repair Button ───────────────────────────────────────────────────────────
 
+interface RepairResult {
+  success: boolean;
+  plansRecovered: number;
+  carriersResolved: number;
+  unresolvedCarriers: number;
+  unresolvedPlans?: { planName: string | null; planIdentifier: string | null; count: number }[];
+  message: string;
+}
+
+interface UnresolvedGroup {
+  planName: string | null;
+  planIdentifier: string | null;
+  planType: string;
+  count: number;
+  totalEnrollees: number;
+  totalPremium: number;
+}
+
 function RepairButton() {
   const [repairing, setRepairing] = useState(false);
-  const [result, setResult] = useState<{
-    success: boolean;
-    plansRecovered: number;
-    message: string;
-    recoveredPlans?: { period: string; carrier: string | null; planName: string | null; planType: string; enrollees: number }[];
-  } | null>(null);
+  const [result, setResult] = useState<RepairResult | null>(null);
+  const [showAssign, setShowAssign] = useState(false);
+  const [unresolved, setUnresolved] = useState<UnresolvedGroup[]>([]);
+  const [assigningId, setAssigningId] = useState<string | null>(null);
+  const [carrierInput, setCarrierInput] = useState("");
 
   async function runRepair() {
     setRepairing(true);
     setResult(null);
+    setShowAssign(false);
     try {
       const res = await fetch("/api/import/repair", { method: "POST" });
       const data = await res.json();
       setResult(data);
+      // If there are unresolved carriers, load the details
+      if (data.unresolvedCarriers > 0) {
+        loadUnresolved();
+      }
     } catch {
-      setResult({ success: false, plansRecovered: 0, message: "Repair request failed" });
+      setResult({ success: false, plansRecovered: 0, carriersResolved: 0, unresolvedCarriers: 0, message: "Repair request failed" });
     } finally {
       setRepairing(false);
     }
   }
 
+  async function loadUnresolved() {
+    try {
+      const res = await fetch("/api/import/repair/assign-carrier");
+      const data = await res.json();
+      setUnresolved(data.groups || []);
+      if (data.groups?.length > 0) setShowAssign(true);
+    } catch { /* */ }
+  }
+
+  async function assignCarrier(plan: UnresolvedGroup) {
+    if (!carrierInput.trim()) return;
+    const key = plan.planIdentifier || plan.planName;
+    setAssigningId(key);
+    try {
+      const res = await fetch("/api/import/repair/assign-carrier", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          planName: plan.planName,
+          planIdentifier: plan.planIdentifier,
+          carrier: carrierInput.trim(),
+        }),
+      });
+      const data = await res.json();
+      if (data.updated > 0) {
+        // Refresh unresolved list
+        loadUnresolved();
+        setCarrierInput("");
+      }
+    } catch { /* */ }
+    setAssigningId(null);
+  }
+
   return (
-    <div className="flex items-center gap-2">
-      {result && (
-        <span className={`text-xs ${result.plansRecovered > 0 ? "text-green-600" : "text-bob-text-soft"}`}>
-          {result.message}
-        </span>
-      )}
-      <button
-        onClick={runRepair}
-        disabled={repairing}
-        className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-amber-50 text-amber-700 border border-amber-200 rounded-lg hover:bg-amber-100 transition-colors disabled:opacity-50"
-        title="Scan enrollment data to recover plans dropped by historical import bug"
-      >
-        {repairing ? (
-          <><Loader2 className="w-3 h-3 animate-spin" /> Repairing...</>
-        ) : (
-          <><RefreshCw className="w-3 h-3" /> Repair Missing Plans</>
+    <div>
+      <div className="flex items-center gap-2">
+        {result && (
+          <span className={`text-xs ${result.plansRecovered > 0 || result.carriersResolved > 0 ? "text-green-600" : "text-bob-text-soft"}`}>
+            {result.message}
+          </span>
         )}
-      </button>
+        <button
+          onClick={runRepair}
+          disabled={repairing}
+          className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-amber-50 text-amber-700 border border-amber-200 rounded-lg hover:bg-amber-100 transition-colors disabled:opacity-50"
+          title="Scan enrollment data to recover plans and resolve carrier names"
+        >
+          {repairing ? (
+            <><Loader2 className="w-3 h-3 animate-spin" /> Repairing...</>
+          ) : (
+            <><RefreshCw className="w-3 h-3" /> Repair Missing Plans</>
+          )}
+        </button>
+        {unresolved.length > 0 && !showAssign && (
+          <button onClick={() => setShowAssign(true)}
+            className="text-xs text-amber-600 hover:underline">
+            {unresolved.length} unresolved carrier(s)
+          </button>
+        )}
+      </div>
+
+      {/* Unresolved carrier assignment panel */}
+      {showAssign && unresolved.length > 0 && (
+        <div className="mt-3 bg-amber-50 border border-amber-200 rounded-xl p-4">
+          <div className="flex items-center justify-between mb-2">
+            <h3 className="text-xs font-semibold text-amber-800">
+              Plans with Unknown Carrier ({unresolved.length})
+            </h3>
+            <button onClick={() => setShowAssign(false)} className="text-xs text-amber-600 hover:text-amber-800">Close</button>
+          </div>
+          <p className="text-[10px] text-amber-700 mb-3">
+            These plans were recovered from enrollment data but the carrier name could not be determined.
+            Assign the correct carrier name to include them in production reports.
+          </p>
+          <div className="space-y-2">
+            {unresolved.map((plan) => {
+              const key = plan.planIdentifier || plan.planName || "unknown";
+              return (
+                <div key={key} className="flex items-center gap-2 bg-white rounded-lg px-3 py-2 border border-amber-100">
+                  <div className="flex-1 min-w-0">
+                    <div className="text-xs font-medium text-bob-text truncate">
+                      {plan.planName || plan.planIdentifier || "Unknown Plan"}
+                    </div>
+                    <div className="text-[10px] text-bob-text-soft">
+                      {plan.planType} · {plan.count} snapshot(s) · {plan.totalEnrollees} enrollees
+                    </div>
+                  </div>
+                  <input
+                    type="text"
+                    placeholder="Carrier name..."
+                    className="text-xs border border-gray-200 rounded px-2 py-1 w-48"
+                    value={assigningId === key ? carrierInput : ""}
+                    onFocus={() => { setAssigningId(key); setCarrierInput(""); }}
+                    onChange={(e) => { setAssigningId(key); setCarrierInput(e.target.value); }}
+                  />
+                  <button
+                    onClick={() => assignCarrier(plan)}
+                    disabled={assigningId !== key || !carrierInput.trim()}
+                    className="text-xs px-2 py-1 bg-bob-purple text-white rounded hover:bg-bob-purple/90 disabled:opacity-30 whitespace-nowrap"
+                  >
+                    Assign
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
