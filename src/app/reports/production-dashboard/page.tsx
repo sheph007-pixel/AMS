@@ -1,9 +1,9 @@
 "use client";
 
-import React, { useEffect, useState, useMemo, useRef, useCallback } from "react";
+import { useEffect, useState, useMemo, useRef, useCallback } from "react";
 import {
   Download, Search, ArrowUpDown, ArrowUp, ArrowDown,
-  Settings2, Save, X, ChevronDown, ShieldCheck, AlertTriangle, Loader2,
+  Settings2, Save, X, ChevronDown,
 } from "lucide-react";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -192,154 +192,6 @@ function FilterDropdown({
         </select>
         <ChevronDown className="absolute right-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400 pointer-events-none" />
       </div>
-    </div>
-  );
-}
-
-// ─── Report Audit Panel ─────────────────────────────────────────────────────
-
-/* eslint-disable @typescript-eslint/no-explicit-any */
-
-interface AuditMonthRow {
-  period: string; year: number; month: number;
-  fileUploaded: boolean; uploadedAt: string | null;
-  companies: number; activeEmployees: number;
-  premium: number; estimatedIncome: number;
-  checks: { name: string; status: string; message: string }[];
-  status: string;
-}
-
-interface AuditData {
-  id: string; status: string; createdAt: string;
-  months: AuditMonthRow[];
-  totals: { companies: number; activeEmployees: number; premium: number; estimatedIncome: number };
-  checksRun: number; checksPassed: number; checksFailed: number;
-}
-
-function AuditPanel() {
-  const [data, setData] = useState<AuditData | null>(null);
-  const [running, setRunning] = useState(false);
-  const [expandedMonth, setExpandedMonth] = useState<string | null>(null);
-
-  const load = useCallback(() => {
-    fetch("/api/reports/audit")
-      .then(r => { if (!r.ok) return null; return r.json(); })
-      .then(d => {
-        if (d && d.months && Array.isArray(d.months) && d.months.length > 0) {
-          // Filter out old-format data that lacks the required fields
-          d.months = d.months.filter((m: any) => m && m.period);
-          if (d.months.length > 0) setData(d);
-        }
-      })
-      .catch(() => {});
-  }, []);
-
-  useEffect(() => { load(); }, [load]);
-
-  async function runAudit() {
-    setRunning(true);
-    try {
-      const res = await fetch("/api/reports/audit", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
-      const d = await res.json();
-      if (d.months) setData(d);
-    } catch { /* */ }
-    setRunning(false);
-  }
-
-  const fmtCur = (n: number) => "$" + (n ?? 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-
-  return (
-    <div className="bg-white rounded-2xl border border-bob-border overflow-hidden mb-6">
-      {/* Header */}
-      <div className="px-5 py-4 flex items-center justify-between border-b border-bob-border">
-        <div className="flex items-center gap-3">
-          <div className={`w-8 h-8 rounded-lg flex items-center justify-center ${
-            data?.status === "verified" ? "bg-green-50" : data?.status === "needs_review" ? "bg-red-50" : "bg-blue-50"
-          }`}>
-            <ShieldCheck className={`w-4 h-4 ${
-              data?.status === "verified" ? "text-green-600" : data?.status === "needs_review" ? "text-red-600" : "text-blue-600"
-            }`} />
-          </div>
-          <div>
-            <h3 className="text-sm font-semibold text-bob-text">Monthly Audit</h3>
-            {data ? (
-              <div className="flex items-center gap-2 mt-0.5">
-                {data.status === "verified"
-                  ? <span className="inline-flex items-center gap-1 px-2 py-0.5 text-xs font-semibold rounded-full bg-green-50 text-green-700"><ShieldCheck className="w-3 h-3" /> Verified</span>
-                  : <span className="inline-flex items-center gap-1 px-2 py-0.5 text-xs font-semibold rounded-full bg-red-50 text-red-700"><AlertTriangle className="w-3 h-3" /> Needs review</span>
-                }
-                <span className="text-[10px] text-bob-text-soft">{data.createdAt ? new Date(data.createdAt).toLocaleString() : ""}</span>
-              </div>
-            ) : (
-              <p className="text-[10px] text-bob-text-soft">Run audit to verify data integrity</p>
-            )}
-          </div>
-        </div>
-        <button onClick={runAudit} disabled={running}
-          className="px-3 py-1.5 text-xs font-medium bg-blue-50 text-blue-700 rounded-lg hover:bg-blue-100 transition-colors disabled:opacity-50">
-          {running ? <><Loader2 className="w-3 h-3 animate-spin inline mr-1" />Running...</> : "Run Audit"}
-        </button>
-      </div>
-
-      {/* Monthly table */}
-      {data && data.months.length > 0 && (
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="bg-gray-50 border-b border-bob-border">
-                <th className="px-4 py-2.5 text-left text-xs font-semibold text-gray-500 uppercase">Month</th>
-                <th className="px-4 py-2.5 text-left text-xs font-semibold text-gray-500 uppercase">File Uploaded</th>
-                <th className="px-4 py-2.5 text-right text-xs font-semibold text-gray-500 uppercase">Companies</th>
-                <th className="px-4 py-2.5 text-right text-xs font-semibold text-gray-500 uppercase">Active Employees</th>
-                <th className="px-4 py-2.5 text-right text-xs font-semibold text-gray-500 uppercase">Premium</th>
-                <th className="px-4 py-2.5 text-right text-xs font-semibold text-gray-500 uppercase">Est. Income</th>
-                <th className="px-4 py-2.5 text-center text-xs font-semibold text-gray-500 uppercase w-16">Status</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-100">
-              {data.months.map(m => (
-                <React.Fragment key={m.period}>
-                  <tr
-                    onClick={() => setExpandedMonth(expandedMonth === m.period ? null : m.period)}
-                    className="hover:bg-gray-50 cursor-pointer transition-colors">
-                    <td className="px-4 py-2.5 font-medium text-bob-text">{m.month ? `${MONTH_NAMES[m.month]} ${m.year}` : m.period || "—"}</td>
-                    <td className="px-4 py-2.5 text-bob-text-soft text-xs">
-                      {m.uploadedAt ? new Date(m.uploadedAt).toLocaleDateString() : "—"}
-                    </td>
-                    <td className="px-4 py-2.5 text-right text-bob-text">{m.companies ?? 0}</td>
-                    <td className="px-4 py-2.5 text-right text-bob-text">{(m.activeEmployees ?? 0).toLocaleString()}</td>
-                    <td className="px-4 py-2.5 text-right text-bob-text">{fmtCur(m.premium ?? 0)}</td>
-                    <td className="px-4 py-2.5 text-right text-bob-text">{fmtCur(m.estimatedIncome ?? 0)}</td>
-                    <td className="px-4 py-2.5 text-center">
-                      {m.status === "pass"
-                        ? <span className="inline-block w-2 h-2 rounded-full bg-green-500" title="Pass" />
-                        : <span className="inline-block w-2 h-2 rounded-full bg-red-500" title="Needs review" />
-                      }
-                    </td>
-                  </tr>
-                  {expandedMonth === m.period && (
-                    <tr>
-                      <td colSpan={7} className="px-4 py-3 bg-gray-50">
-                        <div className="space-y-1">
-                          {m.checks.map((c, i) => (
-                            <div key={i} className={`text-xs px-3 py-1 rounded ${
-                              c.status === "pass" ? "bg-green-50 text-green-700" :
-                              c.status === "info" ? "bg-blue-50 text-blue-700" :
-                              "bg-red-50 text-red-700"
-                            }`}>
-                              {c.message}
-                            </div>
-                          ))}
-                        </div>
-                      </td>
-                    </tr>
-                  )}
-                </React.Fragment>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
     </div>
   );
 }
@@ -658,9 +510,6 @@ export default function ProductionDashboardPage() {
       {!loading && (
         <CarrierSettingsPanel settings={carrierSettings} onSave={handleSaveSetting} />
       )}
-
-      {/* Report Audit */}
-      {!loading && <AuditPanel />}
 
       {/* Filters */}
       {!loading && filterOptions && (
