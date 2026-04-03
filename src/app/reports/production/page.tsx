@@ -56,10 +56,11 @@ interface Summary {
 
 interface Methodology {
   dataSource: string;
-  pepmCarriers: string[];
-  commissionCarriers: string[];
-  pepmRate: number;
-  commissionRate: number;
+  incomeSource?: string;
+  pepmCarriers?: string[];
+  commissionCarriers?: string[];
+  pepmRate?: number;
+  commissionRate?: number;
   note: string;
 }
 
@@ -155,8 +156,11 @@ function toExcelXML(rows: ProductionRow[], summary: Summary | null, methodology:
   xml += blankRow();
   xml += `<Row>${cell("Fee Model:", "Bold")}</Row>`;
   if (methodology) {
-    xml += `<Row>${cell(`  PEPM Carriers (${methodology.pepmCarriers.join(", ")}): Enrolled employees x $${methodology.pepmRate}/month`)}</Row>`;
-    xml += `<Row>${cell(`  Commission Carriers (${methodology.commissionCarriers.join(", ")}): Monthly premium x ${methodology.commissionRate * 100}%`)}</Row>`;
+    if (methodology.pepmCarriers && methodology.commissionCarriers) {
+      xml += `<Row>${cell(`  PEPM Carriers (${methodology.pepmCarriers.join(", ")}): Enrolled employees x $${methodology.pepmRate}/month`)}</Row>`;
+      xml += `<Row>${cell(`  Commission Carriers (${methodology.commissionCarriers.join(", ")}): Monthly premium x ${(methodology.commissionRate || 0) * 100}%`)}</Row>`;
+    }
+    xml += `<Row>${cell(methodology.incomeSource || "Income rates configured per carrier in Carrier Settings")}</Row>`;
     xml += `<Row>${cell("  Carriers not in either category: No estimated fee (actual fees tracked in financial statements)")}</Row>`;
   }
   xml += blankRow();
@@ -823,8 +827,9 @@ export default function ProductionReportPage() {
               <div>
                 <p className="font-semibold mb-1">Fee Model:</p>
                 <ul className="list-disc list-inside space-y-1 text-bob-text-soft">
-                  <li><strong>PEPM Carriers</strong> ({methodology.pepmCarriers.join(", ")}): Enrolled employees x ${methodology.pepmRate}/month</li>
-                  <li><strong>Commission Carriers</strong> ({methodology.commissionCarriers.join(", ")}): Monthly premium x {methodology.commissionRate * 100}%</li>
+                  {methodology.pepmCarriers && <li><strong>PEPM Carriers</strong> ({methodology.pepmCarriers.join(", ")}): Enrolled employees x ${methodology.pepmRate}/month</li>}
+                  {methodology.commissionCarriers && methodology.commissionRate && <li><strong>Commission Carriers</strong> ({methodology.commissionCarriers.join(", ")}): Monthly premium x {methodology.commissionRate * 100}%</li>}
+                  <li>{methodology.incomeSource || "Income rates configured per carrier in Carrier Settings"}</li>
                   <li>Carriers not in either category show no estimated fee — actual fees are in the financial statements</li>
                 </ul>
               </div>

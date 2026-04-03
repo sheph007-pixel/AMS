@@ -222,7 +222,10 @@ function AuditPanel() {
   const [expandedMonth, setExpandedMonth] = useState<string | null>(null);
 
   const load = useCallback(() => {
-    fetch("/api/reports/audit").then(r => r.json()).then(d => { if (d && d.months) setData(d); }).catch(() => {});
+    fetch("/api/reports/audit")
+      .then(r => { if (!r.ok) return null; return r.json(); })
+      .then(d => { if (d && d.months && Array.isArray(d.months) && d.months.length > 0) setData(d); })
+      .catch(() => {});
   }, []);
 
   useEffect(() => { load(); }, [load]);
