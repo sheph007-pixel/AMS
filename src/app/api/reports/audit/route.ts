@@ -3,66 +3,40 @@ import { prisma } from "@/lib/db";
 import { runProductionAudit } from "@/lib/report-audit";
 
 /**
- * POST — Run a new deterministic audit for a report type.
- * GET  — List recent audit runs.
+ * POST — Run audit. Returns monthly summary rows + overall status.
+ * GET  — Return most recent persisted audit.
  */
 export async function POST(req: NextRequest) {
   try {
-    const body = await req.json().catch(() => ({}));
-
+    await req.json().catch(() => ({}));
     const result = await runProductionAudit();
 
-    // Persist the audit run
+    // Persist
     const audit = await prisma.reportAudit.create({
       data: {
         reportType: "production-dashboard",
-        scope: JSON.stringify(body.scope || {}),
+        scope: "{}",
         status: result.status,
         checksRun: result.checksRun,
         checksPassed: result.checksPassed,
         checksFailed: result.checksFailed,
-        checksDetail: JSON.stringify(result.checks),
-        reportTotalRows: result.reportTotals.rows,
-        reportTotalLives: result.reportTotals.lives,
-        reportTotalPremium: result.reportTotals.premium,
-        reportTotalIncome: result.reportTotals.income,
-        auditTotalRows: result.auditTotals.rows,
-        auditTotalLives: result.auditTotals.lives,
-        auditTotalPremium: result.auditTotals.premium,
-        auditTotalIncome: result.auditTotals.income,
-        varianceRows: result.variances.rows,
-        varianceLives: result.variances.lives,
-        variancePremium: result.variances.premium,
-        varianceIncome: result.variances.income,
-        monthSubtotals: JSON.stringify(result.monthSubtotals),
-        clientSubtotals: JSON.stringify(result.clientSubtotals),
-        carrierSubtotals: JSON.stringify(result.carrierSubtotals),
+        checksDetail: JSON.stringify(result.months),
+        reportTotalRows: result.months.length,
+        reportTotalLives: result.totals.activeEmployees,
+        reportTotalPremium: result.totals.premium,
+        reportTotalIncome: result.totals.estimatedIncome,
+        auditTotalRows: result.months.length,
+        auditTotalLives: result.totals.activeEmployees,
+        auditTotalPremium: result.totals.premium,
+        auditTotalIncome: result.totals.estimatedIncome,
+        varianceRows: 0,
+        varianceLives: 0,
+        variancePremium: 0,
+        varianceIncome: 0,
       },
     });
 
-    return NextResponse.json({
-      id: audit.id,
-      reportType: audit.reportType,
-      status: result.status,
-      checksRun: result.checksRun,
-      checksPassed: result.checksPassed,
-      checksFailed: result.checksFailed,
-      checks: result.checks,
-      reportTotalRows: result.reportTotals.rows,
-      reportTotalLives: result.reportTotals.lives,
-      reportTotalPremium: result.reportTotals.premium,
-      reportTotalIncome: result.reportTotals.income,
-      auditTotalRows: result.auditTotals.rows,
-      auditTotalLives: result.auditTotals.lives,
-      auditTotalPremium: result.auditTotals.premium,
-      auditTotalIncome: result.auditTotals.income,
-      varianceRows: result.variances.rows,
-      varianceLives: result.variances.lives,
-      variancePremium: result.variances.premium,
-      varianceIncome: result.variances.income,
-      aiReviewCompleted: false,
-      createdAt: audit.createdAt,
-    });
+    return NextResponse.json({ id: audit.id, createdAt: audit.createdAt, ...result });
   } catch (error) {
     console.error("Audit run error:", error);
     return NextResponse.json({ error: "Failed to run audit" }, { status: 500 });
@@ -71,22 +45,31 @@ export async function POST(req: NextRequest) {
 
 export async function GET() {
   try {
-    const audits = await prisma.reportAudit.findMany({
+    const latest = await prisma.reportAudit.findFirst({
       orderBy: { createdAt: "desc" },
-      take: 20,
-      select: {
-        id: true, reportType: true, status: true,
-        checksRun: true, checksPassed: true, checksFailed: true,
-        reportTotalRows: true, reportTotalPremium: true, reportTotalIncome: true,
-        auditTotalRows: true, auditTotalPremium: true, auditTotalIncome: true,
-        varianceRows: true, variancePremium: true, varianceIncome: true,
-        aiReviewCompleted: true,
-        createdAt: true,
-      },
     });
-    return NextResponse.json(audits);
+    if (!latest) return NextResponse.json(null);
+
+    let months = [];
+    try { months = JSON.parse(latest.checksDetail || "[]"); } catch { /* */ }
+
+    return NextResponse.json({
+      id: latest.id,
+      status: latest.status,
+      checksRun: latest.checksRun,
+      checksPassed: latest.checksPassed,
+      checksFailed: latest.checksFailed,
+      months,
+      totals: {
+        companies: 0, // not stored, recalculated from months
+        activeEmployees: latest.reportTotalLives,
+        premium: latest.reportTotalPremium,
+        estimatedIncome: latest.reportTotalIncome,
+      },
+      createdAt: latest.createdAt,
+    });
   } catch (error) {
-    console.error("Audit list error:", error);
-    return NextResponse.json({ error: "Failed to list audits" }, { status: 500 });
+    console.error("Audit GET error:", error);
+    return NextResponse.json({ error: "Failed to load audit" }, { status: 500 });
   }
 }

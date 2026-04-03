@@ -200,110 +200,135 @@ function FilterDropdown({
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
-interface AuditCheck { name: string; status: string; message: string }
-interface AuditSummary {
-  id: string; status: string; checksRun: number; checksPassed: number; checksFailed: number;
-  reportTotalRows: number; reportTotalPremium: number; reportTotalIncome: number;
-  auditTotalRows: number; auditTotalPremium: number; auditTotalIncome: number;
-  varianceRows: number; variancePremium: number; varianceIncome: number;
-  createdAt: string;
+interface AuditMonthRow {
+  period: string; year: number; month: number;
+  fileUploaded: boolean; uploadedAt: string | null;
+  companies: number; activeEmployees: number;
+  premium: number; estimatedIncome: number;
+  checks: { name: string; status: string; message: string }[];
+  status: string;
+}
+
+interface AuditData {
+  id: string; status: string; createdAt: string;
+  months: AuditMonthRow[];
+  totals: { companies: number; activeEmployees: number; premium: number; estimatedIncome: number };
+  checksRun: number; checksPassed: number; checksFailed: number;
 }
 
 function AuditPanel() {
-  const [latest, setLatest] = useState<AuditSummary | null>(null);
-  const [checks, setChecks] = useState<AuditCheck[]>([]);
+  const [data, setData] = useState<AuditData | null>(null);
   const [running, setRunning] = useState(false);
-  const [expanded, setExpanded] = useState(false);
+  const [expandedMonth, setExpandedMonth] = useState<string | null>(null);
 
-  const loadLatest = useCallback(() => {
-    fetch("/api/reports/audit").then(r => r.json()).then((list: AuditSummary[]) => {
-      if (list.length > 0) setLatest(list[0]);
-    }).catch(() => {});
+  const load = useCallback(() => {
+    fetch("/api/reports/audit").then(r => r.json()).then(d => { if (d && d.months) setData(d); }).catch(() => {});
   }, []);
 
-  useEffect(() => { loadLatest(); }, [loadLatest]);
+  useEffect(() => { load(); }, [load]);
 
   async function runAudit() {
     setRunning(true);
     try {
-      const res = await fetch("/api/reports/audit", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: "{}",
-      });
-      const data = await res.json();
-      setLatest(data);
-      setChecks(data.checks || []);
-      setExpanded(true);
+      const res = await fetch("/api/reports/audit", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+      const d = await res.json();
+      if (d.months) setData(d);
     } catch { /* */ }
     setRunning(false);
   }
 
-  async function loadDetail() {
-    if (!latest?.id || checks.length) { setExpanded(!expanded); return; }
-    try {
-      const res = await fetch(`/api/reports/audit/${latest.id}`);
-      const data = await res.json();
-      setChecks(data.checksDetail || []);
-    } catch { /* */ }
-    setExpanded(!expanded);
-  }
+  const fmtCur = (n: number) => "$" + n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
   return (
     <div className="bg-white rounded-2xl border border-bob-border overflow-hidden mb-6">
-      <div className="px-5 py-4 flex items-center justify-between">
+      {/* Header */}
+      <div className="px-5 py-4 flex items-center justify-between border-b border-bob-border">
         <div className="flex items-center gap-3">
           <div className={`w-8 h-8 rounded-lg flex items-center justify-center ${
-            latest?.status === "verified" ? "bg-green-50" : latest?.status === "needs_review" ? "bg-red-50" : "bg-blue-50"
+            data?.status === "verified" ? "bg-green-50" : data?.status === "needs_review" ? "bg-red-50" : "bg-blue-50"
           }`}>
             <ShieldCheck className={`w-4 h-4 ${
-              latest?.status === "verified" ? "text-green-600" : latest?.status === "needs_review" ? "text-red-600" : "text-blue-600"
+              data?.status === "verified" ? "text-green-600" : data?.status === "needs_review" ? "text-red-600" : "text-blue-600"
             }`} />
           </div>
           <div>
-            <h3 className="text-sm font-semibold text-bob-text">Data Integrity Audit</h3>
-            {latest ? (
+            <h3 className="text-sm font-semibold text-bob-text">Monthly Audit</h3>
+            {data ? (
               <div className="flex items-center gap-2 mt-0.5">
-                {latest.status === "verified"
+                {data.status === "verified"
                   ? <span className="inline-flex items-center gap-1 px-2 py-0.5 text-xs font-semibold rounded-full bg-green-50 text-green-700"><ShieldCheck className="w-3 h-3" /> Verified</span>
                   : <span className="inline-flex items-center gap-1 px-2 py-0.5 text-xs font-semibold rounded-full bg-red-50 text-red-700"><AlertTriangle className="w-3 h-3" /> Needs review</span>
                 }
-                <span className="text-[10px] text-bob-text-soft">{latest.checksPassed}/{latest.checksRun} checks passed</span>
-                <span className="text-[10px] text-bob-text-soft">{new Date(latest.createdAt).toLocaleString()}</span>
+                <span className="text-[10px] text-bob-text-soft">{new Date(data.createdAt).toLocaleString()}</span>
               </div>
             ) : (
-              <p className="text-[10px] text-bob-text-soft">No audit run yet</p>
+              <p className="text-[10px] text-bob-text-soft">Run audit to verify data integrity</p>
             )}
           </div>
         </div>
-        <div className="flex items-center gap-2">
-          {latest && (
-            <button onClick={loadDetail} className="px-3 py-1.5 text-xs font-medium text-bob-text-soft hover:text-bob-text rounded-lg hover:bg-gray-50 transition-colors">
-              {expanded ? "Hide" : "Details"}
-            </button>
-          )}
-          <button onClick={runAudit} disabled={running}
-            className="px-3 py-1.5 text-xs font-medium bg-blue-50 text-blue-700 rounded-lg hover:bg-blue-100 transition-colors disabled:opacity-50">
-            {running ? <><Loader2 className="w-3 h-3 animate-spin inline mr-1" />Running...</> : "Run Audit"}
-          </button>
-        </div>
+        <button onClick={runAudit} disabled={running}
+          className="px-3 py-1.5 text-xs font-medium bg-blue-50 text-blue-700 rounded-lg hover:bg-blue-100 transition-colors disabled:opacity-50">
+          {running ? <><Loader2 className="w-3 h-3 animate-spin inline mr-1" />Running...</> : "Run Audit"}
+        </button>
       </div>
 
-      {/* Check details */}
-      {expanded && checks.length > 0 && (
-        <div className="border-t border-bob-border px-5 py-4">
-          <div className="space-y-1">
-            {checks.map((c, i) => (
-              <div key={i} className={`text-xs px-3 py-1.5 rounded flex items-center justify-between ${
-                c.status === "pass" ? "bg-green-50 text-green-700" :
-                c.status === "warning" ? "bg-gray-50 text-bob-text-soft" :
-                "bg-red-50 text-red-700"
-              }`}>
-                <span>{c.message}</span>
-                <span className="font-mono text-[10px] ml-4 shrink-0">{c.status === "warning" ? "INFO" : c.status.toUpperCase()}</span>
-              </div>
-            ))}
-          </div>
+      {/* Monthly table */}
+      {data && data.months.length > 0 && (
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="bg-gray-50 border-b border-bob-border">
+                <th className="px-4 py-2.5 text-left text-xs font-semibold text-gray-500 uppercase">Month</th>
+                <th className="px-4 py-2.5 text-left text-xs font-semibold text-gray-500 uppercase">File Uploaded</th>
+                <th className="px-4 py-2.5 text-right text-xs font-semibold text-gray-500 uppercase">Companies</th>
+                <th className="px-4 py-2.5 text-right text-xs font-semibold text-gray-500 uppercase">Active Employees</th>
+                <th className="px-4 py-2.5 text-right text-xs font-semibold text-gray-500 uppercase">Premium</th>
+                <th className="px-4 py-2.5 text-right text-xs font-semibold text-gray-500 uppercase">Est. Income</th>
+                <th className="px-4 py-2.5 text-center text-xs font-semibold text-gray-500 uppercase w-16">Status</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-100">
+              {data.months.map(m => (
+                <>
+                  <tr key={m.period}
+                    onClick={() => setExpandedMonth(expandedMonth === m.period ? null : m.period)}
+                    className="hover:bg-gray-50 cursor-pointer transition-colors">
+                    <td className="px-4 py-2.5 font-medium text-bob-text">{MONTH_NAMES[m.month]} {m.year}</td>
+                    <td className="px-4 py-2.5 text-bob-text-soft text-xs">
+                      {m.uploadedAt ? new Date(m.uploadedAt).toLocaleDateString() : "—"}
+                    </td>
+                    <td className="px-4 py-2.5 text-right text-bob-text">{m.companies}</td>
+                    <td className="px-4 py-2.5 text-right text-bob-text">{m.activeEmployees.toLocaleString()}</td>
+                    <td className="px-4 py-2.5 text-right text-bob-text">{fmtCur(m.premium)}</td>
+                    <td className="px-4 py-2.5 text-right text-bob-text">{fmtCur(m.estimatedIncome)}</td>
+                    <td className="px-4 py-2.5 text-center">
+                      {m.status === "pass"
+                        ? <span className="inline-block w-2 h-2 rounded-full bg-green-500" title="Pass" />
+                        : <span className="inline-block w-2 h-2 rounded-full bg-red-500" title="Needs review" />
+                      }
+                    </td>
+                  </tr>
+                  {expandedMonth === m.period && (
+                    <tr key={`${m.period}-detail`}>
+                      <td colSpan={7} className="px-4 py-3 bg-gray-50">
+                        <div className="space-y-1">
+                          {m.checks.map((c, i) => (
+                            <div key={i} className={`text-xs px-3 py-1 rounded ${
+                              c.status === "pass" ? "bg-green-50 text-green-700" :
+                              c.status === "info" ? "bg-blue-50 text-blue-700" :
+                              "bg-red-50 text-red-700"
+                            }`}>
+                              {c.message}
+                            </div>
+                          ))}
+                        </div>
+                      </td>
+                    </tr>
+                  )}
+                </>
+              ))}
+            </tbody>
+          </table>
         </div>
       )}
     </div>

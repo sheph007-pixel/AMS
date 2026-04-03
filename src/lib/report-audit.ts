@@ -3,313 +3,222 @@ import { prisma } from "@/lib/db";
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 /**
- * Report Audit — Monthly Snapshot Integrity Checks
+ * Report Audit — Monthly Snapshot Integrity
  *
- * Simple, deterministic checks against raw database records.
- * No cross-pipeline comparisons. No complex recomputation.
- *
- * Primary checks (drive pass/fail status):
- *   1. Monthly snapshot integrity — one snapshot per client per month
- *   2. Company uniqueness — no duplicate company identifiers per month
- *   3. Employee uniqueness — no duplicate employee identifiers per month
- *   4. Employee inclusion — active only, no termed, no COBRA
- *   5. Benefit logic — qualifying enrollments, no duplicate plan+tier
- *   6. Totals sanity — counts match qualifying data only
- *
- * Secondary (informational only, never drives status):
- *   - Dashboard cache consistency check
+ * Primary output: one row per month with summary metrics.
+ * Secondary: deterministic integrity checks (drill-down per month).
  */
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
+export interface AuditMonthRow {
+  period: string;       // "2023-07"
+  year: number;
+  month: number;
+  fileUploaded: boolean;
+  uploadedAt: string | null;
+  companies: number;
+  activeEmployees: number;
+  premium: number;
+  estimatedIncome: number;
+  checks: AuditCheck[];
+  status: "pass" | "fail";
+}
+
 export interface AuditCheck {
   name: string;
-  status: "pass" | "fail" | "warning";
+  status: "pass" | "fail" | "info";
   message: string;
-  expected?: string | number;
-  actual?: string | number;
-}
-
-export interface MonthSubtotal {
-  rows: number;
-  lives: number;
-  premium: number;
-  income: number;
-}
-
-export interface EntitySubtotal {
-  name: string;
-  rows: number;
-  lives: number;
-  premium: number;
-  income: number;
 }
 
 export interface AuditResult {
   status: "verified" | "needs_review";
-  checks: AuditCheck[];
+  months: AuditMonthRow[];
+  totals: {
+    companies: number;
+    activeEmployees: number;
+    premium: number;
+    estimatedIncome: number;
+  };
   checksRun: number;
   checksPassed: number;
   checksFailed: number;
-  reportTotals: { rows: number; lives: number; premium: number; income: number };
-  auditTotals: { rows: number; lives: number; premium: number; income: number };
-  variances: { rows: number; lives: number; premium: number; income: number };
-  monthSubtotals: Record<string, MonthSubtotal>;
-  clientSubtotals: EntitySubtotal[];
-  carrierSubtotals: EntitySubtotal[];
 }
 
 // ─── Main ───────────────────────────────────────────────────────────────────
 
 export async function runProductionAudit(): Promise<AuditResult> {
-  const checks: AuditCheck[] = [];
+  // Load carrier settings for exclusion + income
+  const carrierSettings = await prisma.carrierSetting.findMany();
+  const excludedCarriers = new Set(
+    carrierSettings.filter(cs => cs.excluded).map(cs => cs.carrierName.toLowerCase())
+  );
+  const csMap = new Map(
+    carrierSettings.map(cs => [cs.carrierName.toLowerCase(), { incomeMethod: cs.incomeMethod, rate: cs.rate }])
+  );
 
-  // Load all snapshots with their data
+  // Load all snapshots
   const snapshots = await prisma.clientSnapshot.findMany({
     where: { year: { gte: 2022 } },
     select: {
-      id: true, year: true, month: true,
+      id: true, year: true, month: true, importedAt: true,
       client: { select: { groupId: true, groupName: true } },
       employees: { select: { employeeId: true, status: true } },
-      benefitPlans: { select: { planType: true, carrier: true, enrollees: true, premium: true } },
+      benefitPlans: { select: { planType: true, carrier: true, planName: true, enrollees: true, premium: true } },
     },
+    orderBy: [{ year: "desc" }, { month: "desc" }],
   });
 
-  // ── 1. Monthly Snapshot Integrity ───────────────────────────────────
-  // One snapshot per client per month. No duplicates. No month-0.
-
-  const monthClientKeys = new Map<string, number>();
-  let invalidMonths = 0;
-  for (const s of snapshots) {
-    if (s.month < 1 || s.month > 12) { invalidMonths++; continue; }
-    const key = `${s.client.groupId}||${s.year}-${String(s.month).padStart(2, "0")}`;
-    monthClientKeys.set(key, (monthClientKeys.get(key) || 0) + 1);
-  }
-  const duplicateSnapshots = Array.from(monthClientKeys.values()).filter(v => v > 1).length;
-
-  checks.push({
-    name: "no-invalid-months",
-    status: invalidMonths === 0 ? "pass" : "fail",
-    message: invalidMonths === 0 ? "All snapshots have valid months (1-12)" : `${invalidMonths} snapshots have invalid month values`,
-    expected: 0, actual: invalidMonths,
-  });
-
-  checks.push({
-    name: "no-duplicate-snapshots",
-    status: duplicateSnapshots === 0 ? "pass" : "fail",
-    message: duplicateSnapshots === 0
-      ? `${monthClientKeys.size} unique client-month combinations, no duplicates`
-      : `${duplicateSnapshots} client-month combinations have duplicate snapshots`,
-    expected: 0, actual: duplicateSnapshots,
-  });
-
-  // ── 2. Company Uniqueness ──────────────────────────────────────────
-  // Each company identifier should appear once per month (handled above by snapshot uniqueness).
-  // Check that groupIds are consistent across snapshots.
-
-  const companyNames = new Map<string, Set<string>>();
-  for (const s of snapshots) {
-    if (!companyNames.has(s.client.groupId)) companyNames.set(s.client.groupId, new Set());
-    companyNames.get(s.client.groupId)!.add(s.client.groupName);
-  }
-  const inconsistentCompanies = Array.from(companyNames.entries()).filter(([, names]) => names.size > 1);
-
-  checks.push({
-    name: "company-uniqueness",
-    status: inconsistentCompanies.length === 0 ? "pass" : "warning",
-    message: inconsistentCompanies.length === 0
-      ? `${companyNames.size} companies, all with consistent names`
-      : `${inconsistentCompanies.length} companies have inconsistent names across months`,
-    expected: 0, actual: inconsistentCompanies.length,
-  });
-
-  // ── 3. Employee Uniqueness ─────────────────────────────────────────
-  // Each employee identifier should appear once per snapshot.
-
-  let totalEmployees = 0;
-  let duplicateEmployees = 0;
-  for (const s of snapshots) {
-    if (s.month < 1 || s.month > 12) continue;
-    const empIds = new Set<string>();
-    for (const e of s.employees) {
-      if (empIds.has(e.employeeId)) duplicateEmployees++;
-      else empIds.add(e.employeeId);
-      totalEmployees++;
-    }
-  }
-
-  checks.push({
-    name: "employee-uniqueness",
-    status: duplicateEmployees === 0 ? "pass" : "fail",
-    message: duplicateEmployees === 0
-      ? `${totalEmployees.toLocaleString()} employee records, no duplicates within any monthly snapshot`
-      : `${duplicateEmployees} duplicate employee records found within monthly snapshots`,
-    expected: 0, actual: duplicateEmployees,
-  });
-
-  // ── 4. Employee Inclusion Rules ────────────────────────────────────
-  // Active employees included. Termed employees excluded from counts.
-  // COBRA plans excluded.
-
-  let activeEmployees = 0;
-  let termedEmployees = 0;
-  let cobraPlans = 0;
-  let totalPlans = 0;
-  for (const s of snapshots) {
-    if (s.month < 1 || s.month > 12) continue;
-    for (const e of s.employees) {
-      const st = (e.status || "Active").toLowerCase();
-      if (st === "active") activeEmployees++;
-      else termedEmployees++;
-    }
-    for (const bp of s.benefitPlans) {
-      totalPlans++;
-      if (bp.planType?.toLowerCase() === "cobra") cobraPlans++;
-    }
-  }
-
-  checks.push({
-    name: "employee-status-breakdown",
-    status: "pass",
-    message: `${activeEmployees.toLocaleString()} active employees, ${termedEmployees.toLocaleString()} termed/inactive (correctly excluded from report counts)`,
-    expected: activeEmployees, actual: activeEmployees,
-  });
-
-  checks.push({
-    name: "cobra-plans-identified",
-    status: "pass",
-    message: cobraPlans > 0
-      ? `${cobraPlans} COBRA plans identified and excluded from ${totalPlans.toLocaleString()} total plans`
-      : `No COBRA plans found in ${totalPlans.toLocaleString()} total plans`,
-    expected: 0, actual: cobraPlans,
-  });
-
-  // ── 5. Benefit Logic ───────────────────────────────────────────────
-  // Plans with zero enrollees are valid (employee may have no benefits).
-  // No negative enrollees or premium.
-
-  let negativePremium = 0;
-  let negativeEnrollees = 0;
-  let plansWithData = 0;
-  for (const s of snapshots) {
-    if (s.month < 1 || s.month > 12) continue;
-    for (const bp of s.benefitPlans) {
-      if (bp.planType?.toLowerCase() === "cobra") continue;
-      plansWithData++;
-      if ((bp.premium || 0) < 0) negativePremium++;
-      if ((bp.enrollees || 0) < 0) negativeEnrollees++;
-    }
-  }
-
-  checks.push({
-    name: "no-negative-values",
-    status: negativePremium === 0 && negativeEnrollees === 0 ? "pass" : "fail",
-    message: negativePremium === 0 && negativeEnrollees === 0
-      ? `${plansWithData.toLocaleString()} benefit plan records, all with valid values`
-      : `Found ${negativePremium} negative premium and ${negativeEnrollees} negative enrollee values`,
-    expected: 0, actual: negativePremium + negativeEnrollees,
-  });
-
-  // ── 6. Totals Sanity ──────────────────────────────────────────────
-  // Sum from qualifying data only (valid months, non-COBRA, non-excluded carriers).
-
-  const carrierSettings = await prisma.carrierSetting.findMany();
-  const excludedCarriers = new Set(carrierSettings.filter(cs => cs.excluded).map(cs => cs.carrierName.toLowerCase()));
-
-  let auditLives = 0, auditPremium = 0, auditRows = 0;
-  const monthSubs: Record<string, MonthSubtotal> = {};
-  const clientSubs = new Map<string, EntitySubtotal>();
-  const carrierSubs = new Map<string, EntitySubtotal>();
-
+  // Group by period
+  const periodMap = new Map<string, typeof snapshots>();
   for (const s of snapshots) {
     if (s.month < 1 || s.month > 12) continue;
     const period = `${s.year}-${String(s.month).padStart(2, "0")}`;
-
-    for (const bp of s.benefitPlans) {
-      if (bp.planType?.toLowerCase() === "cobra") continue;
-      if (bp.carrier && excludedCarriers.has(bp.carrier.toLowerCase())) continue;
-
-      const lives = bp.enrollees || 0;
-      const prem = Math.round((bp.premium || 0) * 100) / 100;
-      auditLives += lives;
-      auditPremium += prem;
-      auditRows++;
-
-      if (!monthSubs[period]) monthSubs[period] = { rows: 0, lives: 0, premium: 0, income: 0 };
-      monthSubs[period].rows++;
-      monthSubs[period].lives += lives;
-      monthSubs[period].premium += prem;
-
-      const cn = s.client.groupName;
-      let cs = clientSubs.get(cn);
-      if (!cs) { cs = { name: cn, rows: 0, lives: 0, premium: 0, income: 0 }; clientSubs.set(cn, cs); }
-      cs.rows++; cs.lives += lives; cs.premium += prem;
-
-      const ca = bp.carrier || "Unspecified";
-      let cr = carrierSubs.get(ca);
-      if (!cr) { cr = { name: ca, rows: 0, lives: 0, premium: 0, income: 0 }; carrierSubs.set(ca, cr); }
-      cr.rows++; cr.lives += lives; cr.premium += prem;
-    }
+    if (!periodMap.has(period)) periodMap.set(period, []);
+    periodMap.get(period)!.push(s);
   }
 
-  auditPremium = Math.round(auditPremium * 100) / 100;
-  const periods = Object.keys(monthSubs).sort();
+  const months: AuditMonthRow[] = [];
+  let totalChecks = 0, totalPassed = 0, totalFailed = 0;
+  const allCompanies = new Set<string>();
 
-  checks.push({
-    name: "totals-sanity",
-    status: auditLives >= 0 && auditPremium >= 0 ? "pass" : "fail",
-    message: `${auditRows.toLocaleString()} qualifying plan records across ${periods.length} months: ${auditLives.toLocaleString()} lives, $${auditPremium.toLocaleString(undefined, { minimumFractionDigits: 2 })} premium`,
-    expected: auditRows, actual: auditRows,
-  });
+  for (const [period, snaps] of periodMap) {
+    const checks: AuditCheck[] = [];
+    const year = snaps[0].year;
+    const month = snaps[0].month;
 
-  // ── Secondary: Dashboard Cache Consistency (informational) ─────────
+    // Latest upload date for this period
+    const latestUpload = snaps.reduce((latest, s) =>
+      s.importedAt > latest ? s.importedAt : latest, snaps[0].importedAt
+    );
 
-  const cache = await prisma.reportCache.findUnique({ where: { key: "production-dashboard" } });
-  let reportTotals = { rows: 0, lives: 0, premium: 0, income: 0 };
-  if (cache) {
-    try {
-      const data = JSON.parse(cache.data);
-      const rows = data.rows || [];
-      reportTotals.rows = rows.length;
-      for (const r of rows) {
-        reportTotals.lives += r.l ?? 0;
-        reportTotals.premium += r.mp ?? 0;
-        reportTotals.income += r.i ?? 0;
-      }
-      reportTotals.premium = Math.round(reportTotals.premium * 100) / 100;
-      reportTotals.income = Math.round(reportTotals.income * 100) / 100;
-    } catch { /* */ }
-
+    // ── Check 1: One snapshot per company ──
+    const companyIds = new Set(snaps.map(s => s.client.groupId));
+    const dupeCheck = snaps.length > companyIds.size;
     checks.push({
-      name: "cache-consistency",
-      status: "warning",
-      message: `Dashboard cache: ${reportTotals.rows.toLocaleString()} rows, $${reportTotals.premium.toLocaleString(undefined, { minimumFractionDigits: 2 })} premium, $${reportTotals.income.toLocaleString(undefined, { minimumFractionDigits: 2 })} est. income (informational — different aggregation level than plan-level audit totals)`,
+      name: "snapshot-uniqueness",
+      status: dupeCheck ? "fail" : "pass",
+      message: dupeCheck
+        ? `${snaps.length} snapshots for ${companyIds.size} companies (duplicates exist)`
+        : `${companyIds.size} companies, one snapshot each`,
+    });
+
+    // ── Check 2: Employee uniqueness within month ──
+    let dupeEmployees = 0;
+    let activeCount = 0;
+    let termedCount = 0;
+    for (const s of snaps) {
+      const empIds = new Set<string>();
+      for (const e of s.employees) {
+        if (empIds.has(e.employeeId)) dupeEmployees++;
+        else empIds.add(e.employeeId);
+        const st = (e.status || "Active").toLowerCase();
+        if (st === "active") activeCount++;
+        else termedCount++;
+      }
+    }
+    checks.push({
+      name: "employee-uniqueness",
+      status: dupeEmployees === 0 ? "pass" : "fail",
+      message: dupeEmployees === 0
+        ? `${activeCount + termedCount} employees, no duplicates`
+        : `${dupeEmployees} duplicate employee records`,
+    });
+
+    // ── Check 3: Active/termed breakdown ──
+    checks.push({
+      name: "employee-inclusion",
+      status: "info",
+      message: `${activeCount} active, ${termedCount} termed/inactive`,
+    });
+
+    // ── Check 4: COBRA exclusion ──
+    let cobraCount = 0;
+    let totalPlanCount = 0;
+    for (const s of snaps) {
+      for (const bp of s.benefitPlans) {
+        totalPlanCount++;
+        if (bp.planType?.toLowerCase() === "cobra") cobraCount++;
+      }
+    }
+    if (cobraCount > 0) {
+      checks.push({
+        name: "cobra-excluded",
+        status: "info",
+        message: `${cobraCount} COBRA plans excluded from ${totalPlanCount} total`,
+      });
+    }
+
+    // ── Check 5: No negative values ──
+    let negatives = 0;
+    for (const s of snaps) {
+      for (const bp of s.benefitPlans) {
+        if ((bp.premium || 0) < 0 || (bp.enrollees || 0) < 0) negatives++;
+      }
+    }
+    if (negatives > 0) {
+      checks.push({
+        name: "no-negatives",
+        status: "fail",
+        message: `${negatives} records with negative premium or enrollees`,
+      });
+    }
+
+    // ── Compute totals (qualifying data only) ──
+    let monthPremium = 0;
+    let monthIncome = 0;
+    for (const s of snaps) {
+      allCompanies.add(s.client.groupId);
+      for (const bp of s.benefitPlans) {
+        if (bp.planType?.toLowerCase() === "cobra") continue;
+        if (bp.carrier && excludedCarriers.has(bp.carrier.toLowerCase())) continue;
+        const prem = Math.round((bp.premium || 0) * 100) / 100;
+        monthPremium += prem;
+        // Income from carrier settings
+        const carrier = (bp.carrier || "").toLowerCase();
+        const setting = csMap.get(carrier);
+        if (setting) {
+          const lives = bp.enrollees || 0;
+          if (setting.incomeMethod === "PEPM") monthIncome += Math.round(lives * setting.rate * 100) / 100;
+          else if (setting.incomeMethod === "PERCENT_PREMIUM") monthIncome += Math.round(prem * (setting.rate / 100) * 100) / 100;
+        }
+      }
+    }
+
+    const hasFail = checks.some(c => c.status === "fail");
+    totalChecks += checks.length;
+    totalPassed += checks.filter(c => c.status === "pass").length;
+    totalFailed += checks.filter(c => c.status === "fail").length;
+
+    months.push({
+      period, year, month,
+      fileUploaded: true,
+      uploadedAt: latestUpload.toISOString(),
+      companies: companyIds.size,
+      activeEmployees: activeCount,
+      premium: Math.round(monthPremium * 100) / 100,
+      estimatedIncome: Math.round(monthIncome * 100) / 100,
+      checks,
+      status: hasFail ? "fail" : "pass",
     });
   }
 
-  // ── Build Result ───────────────────────────────────────────────────
+  // Sort newest first
+  months.sort((a, b) => b.period.localeCompare(a.period));
 
-  const auditTotals = { rows: auditRows, lives: auditLives, premium: auditPremium, income: 0 };
-  const passed = checks.filter(c => c.status === "pass").length;
-  const failed = checks.filter(c => c.status === "fail").length;
-
-  // Only fail/pass. Warnings are informational.
-  const status: "verified" | "needs_review" = failed > 0 ? "needs_review" : "verified";
+  const overallStatus = months.some(m => m.status === "fail") ? "needs_review" : "verified";
 
   return {
-    status, checks,
-    checksRun: checks.length,
-    checksPassed: passed,
-    checksFailed: failed,
-    reportTotals, auditTotals,
-    variances: {
-      rows: auditTotals.rows - reportTotals.rows,
-      lives: auditTotals.lives - reportTotals.lives,
-      premium: Math.round((auditTotals.premium - reportTotals.premium) * 100) / 100,
-      income: Math.round((auditTotals.income - reportTotals.income) * 100) / 100,
+    status: overallStatus,
+    months,
+    totals: {
+      companies: allCompanies.size,
+      activeEmployees: months.reduce((s, m) => s + m.activeEmployees, 0),
+      premium: Math.round(months.reduce((s, m) => s + m.premium, 0) * 100) / 100,
+      estimatedIncome: Math.round(months.reduce((s, m) => s + m.estimatedIncome, 0) * 100) / 100,
     },
-    monthSubtotals: monthSubs,
-    clientSubtotals: Array.from(clientSubs.values()).sort((a, b) => b.premium - a.premium).slice(0, 20),
-    carrierSubtotals: Array.from(carrierSubs.values()).sort((a, b) => b.premium - a.premium),
+    checksRun: totalChecks,
+    checksPassed: totalPassed,
+    checksFailed: totalFailed,
   };
 }
