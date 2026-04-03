@@ -224,7 +224,13 @@ function AuditPanel() {
   const load = useCallback(() => {
     fetch("/api/reports/audit")
       .then(r => { if (!r.ok) return null; return r.json(); })
-      .then(d => { if (d && d.months && Array.isArray(d.months) && d.months.length > 0) setData(d); })
+      .then(d => {
+        if (d && d.months && Array.isArray(d.months) && d.months.length > 0) {
+          // Filter out old-format data that lacks the required fields
+          d.months = d.months.filter((m: any) => m && m.period);
+          if (d.months.length > 0) setData(d);
+        }
+      })
       .catch(() => {});
   }, []);
 
@@ -240,7 +246,7 @@ function AuditPanel() {
     setRunning(false);
   }
 
-  const fmtCur = (n: number) => "$" + n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const fmtCur = (n: number) => "$" + (n ?? 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
   return (
     <div className="bg-white rounded-2xl border border-bob-border overflow-hidden mb-6">
@@ -262,7 +268,7 @@ function AuditPanel() {
                   ? <span className="inline-flex items-center gap-1 px-2 py-0.5 text-xs font-semibold rounded-full bg-green-50 text-green-700"><ShieldCheck className="w-3 h-3" /> Verified</span>
                   : <span className="inline-flex items-center gap-1 px-2 py-0.5 text-xs font-semibold rounded-full bg-red-50 text-red-700"><AlertTriangle className="w-3 h-3" /> Needs review</span>
                 }
-                <span className="text-[10px] text-bob-text-soft">{new Date(data.createdAt).toLocaleString()}</span>
+                <span className="text-[10px] text-bob-text-soft">{data.createdAt ? new Date(data.createdAt).toLocaleString() : ""}</span>
               </div>
             ) : (
               <p className="text-[10px] text-bob-text-soft">Run audit to verify data integrity</p>
@@ -296,14 +302,14 @@ function AuditPanel() {
                   <tr
                     onClick={() => setExpandedMonth(expandedMonth === m.period ? null : m.period)}
                     className="hover:bg-gray-50 cursor-pointer transition-colors">
-                    <td className="px-4 py-2.5 font-medium text-bob-text">{MONTH_NAMES[m.month]} {m.year}</td>
+                    <td className="px-4 py-2.5 font-medium text-bob-text">{m.month ? `${MONTH_NAMES[m.month]} ${m.year}` : m.period || "—"}</td>
                     <td className="px-4 py-2.5 text-bob-text-soft text-xs">
                       {m.uploadedAt ? new Date(m.uploadedAt).toLocaleDateString() : "—"}
                     </td>
-                    <td className="px-4 py-2.5 text-right text-bob-text">{m.companies}</td>
-                    <td className="px-4 py-2.5 text-right text-bob-text">{m.activeEmployees.toLocaleString()}</td>
-                    <td className="px-4 py-2.5 text-right text-bob-text">{fmtCur(m.premium)}</td>
-                    <td className="px-4 py-2.5 text-right text-bob-text">{fmtCur(m.estimatedIncome)}</td>
+                    <td className="px-4 py-2.5 text-right text-bob-text">{m.companies ?? 0}</td>
+                    <td className="px-4 py-2.5 text-right text-bob-text">{(m.activeEmployees ?? 0).toLocaleString()}</td>
+                    <td className="px-4 py-2.5 text-right text-bob-text">{fmtCur(m.premium ?? 0)}</td>
+                    <td className="px-4 py-2.5 text-right text-bob-text">{fmtCur(m.estimatedIncome ?? 0)}</td>
                     <td className="px-4 py-2.5 text-center">
                       {m.status === "pass"
                         ? <span className="inline-block w-2 h-2 rounded-full bg-green-500" title="Pass" />
