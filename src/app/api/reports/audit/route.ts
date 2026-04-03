@@ -9,14 +9,13 @@ import { runProductionAudit } from "@/lib/report-audit";
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json().catch(() => ({}));
-    const reportType = body.reportType || "production-dashboard";
 
-    const result = await runProductionAudit(reportType);
+    const result = await runProductionAudit();
 
     // Persist the audit run
     const audit = await prisma.reportAudit.create({
       data: {
-        reportType,
+        reportType: "production-dashboard",
         scope: JSON.stringify(body.scope || {}),
         status: result.status,
         checksRun: result.checksRun,
