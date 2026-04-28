@@ -62,9 +62,37 @@ export default function TenurePage() {
     count: withTenure.filter((c) => c.tenure >= n).length,
   }));
 
+  function handleExport() {
+    const header = "Group,State,First Year,Tenure (years)";
+    const lines = withTenure.map((c) =>
+      [
+        `"${normalizeCompanyName(c.groupName).replace(/"/g, '""')}"`,
+        c.state || "",
+        c.firstYear,
+        c.tenure,
+      ].join(",")
+    );
+    const csv = [header, ...lines].join("\n");
+    const blob = new Blob([csv], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "tenure.csv";
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
   return (
     <div className="p-6 max-w-4xl mx-auto">
-      <h1 className="text-3xl font-bold mb-2">Client Tenure</h1>
+      <div className="flex items-start justify-between mb-2 gap-4 flex-wrap">
+        <h1 className="text-3xl font-bold">Client Tenure</h1>
+        <button
+          onClick={handleExport}
+          className="px-4 py-2 bg-bob-purple text-white text-sm font-medium rounded-lg hover:bg-bob-purple/90"
+        >
+          Export CSV
+        </button>
+      </div>
       <p className="text-bob-text-soft mb-6">
         {withTenure.length} active clients · tenure measured from first year in system through {latestYear}
       </p>
